@@ -87,6 +87,14 @@ impl Row {
         }
     }
 
+    /// The line on `side`, if this row holds one.
+    pub fn no(&self, side: crate::model::Side) -> Option<u32> {
+        match side {
+            crate::model::Side::Old => self.old_no(),
+            crate::model::Side::New => self.new_no(),
+        }
+    }
+
     pub fn new_no(&self) -> Option<u32> {
         match self {
             Row::Context { new_no, .. } | Row::Insertion { new_no, .. } => Some(*new_no),

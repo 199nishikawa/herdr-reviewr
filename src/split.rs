@@ -1,43 +1,28 @@
 //! Split rows: a diff's old and new lines facing each other, for the side-by-side view.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::diff::{CharRange, Row, Span, change_blocks};
+use crate::diff::{Row, change_blocks};
 use crate::model::Side;
-
-/// One side's line, as a split half paints it.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Half {
-    pub no: u32,
-    pub spans: Vec<Span>,
-    pub emphasis: Vec<CharRange>,
-    pub cr: bool,
-}
 
 /// A split row: an unchanged line on both halves, or changed lines facing each other.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Pair {
-    pub old: Option<Half>,
-    pub new: Option<Half>,
-    /// `false` for an unchanged line shown on both halves.
-    pub changed: bool,
+pub enum Pair {
+    /// An unchanged line: one context row, painted on both halves.
+    Same(Row),
+    /// A deletion facing an insertion; a blank half is `None`.
+    Changed { old: Option<Row>, new: Option<Row> },
 }
 
 impl Pair {
-    /// A half as the one-line row it paints: unchanged context, or a deletion or an insertion,
-    /// numbered with its own side's line; a blank half is `None`.
+    /// The row the half on `side` paints; a blank half is `None`.
     #[must_use]
-    pub fn half(&self, side: Side) -> Option<Row> {
-        let h = match side {
-            Side::Old => self.old.as_ref()?,
-            Side::New => self.new.as_ref()?,
-        };
-        let (no, spans, emphasis, cr) = (h.no, h.spans.clone(), h.emphasis.clone(), h.cr);
-        Some(match (self.changed, side) {
-            (false, _) => Row::Context { old_no: no, new_no: no, spans },
-            (true, Side::Old) => Row::Deletion { old_no: no, spans, emphasis, cr },
-            (true, Side::New) => Row::Insertion { new_no: no, spans, emphasis, cr },
-        })
+    pub fn half(&self, side: Side) -> Option<&Row> {
+        match (self, side) {
+            (Pair::Same(row), _) => Some(row),
+            (Pair::Changed { old, .. }, Side::Old) => old.as_ref(),
+            (Pair::Changed { new, .. }, Side::New) => new.as_ref(),
+        }
     }
 }
 
@@ -58,22 +43,25 @@ impl Visible {
         }
     }
 
+    /// The line on `side` this row holds, if any.
+    #[must_use]
+    pub fn no(&self, side: Side) -> Option<u32> {
+        match self {
+            Visible::Row(row) => row.no(side),
+            Visible::Pair(p) => p.half(side)?.no(side),
+        }
+    }
+
     /// The old-side line on this row, if any.
     #[must_use]
     pub fn old_no(&self) -> Option<u32> {
-        match self {
-            Visible::Row(row) => row.old_no(),
-            Visible::Pair(p) => p.old.as_ref().map(|h| h.no),
-        }
+        self.no(Side::Old)
     }
 
     /// The new-side line on this row, if any.
     #[must_use]
     pub fn new_no(&self) -> Option<u32> {
-        match self {
-            Visible::Row(row) => row.new_no(),
-            Visible::Pair(p) => p.new.as_ref().map(|h| h.no),
-        }
+        self.no(Side::New)
     }
 
     /// Whether this row anchors a comment: every kind but a fold.
@@ -94,102 +82,88 @@ impl Visible {
         self.row().and_then(Row::fold_anchor)
     }
 
-    /// The text a copy reads here: a content row's, or a split row's half on `side`; a fold or
-    /// a blank half reads none.
+    /// The content row a copy or a click reads: a split row's half on `side`, never a fold or gap.
     #[must_use]
-    pub fn content_text(&self, side: Option<Side>) -> Option<String> {
+    pub fn text_row(&self, side: Option<Side>) -> Option<&Row> {
         match self {
-            Visible::Row(row) => row.is_content().then(|| row.text()),
-            Visible::Pair(p) => side.and_then(|s| p.half(s)).map(|r| r.text()),
+            Visible::Row(row) => row.is_content().then_some(row),
+            Visible::Pair(p) => p.half(side?),
         }
     }
-}
 
-/// A unified row's content, for tests that read unified rows; panics on a split pair.
-#[doc(hidden)]
-pub trait UnifiedRow {
-    fn unified(&self) -> &Row;
-
-    fn text(&self) -> String {
-        self.unified().text()
-    }
-
-    fn marker(&self) -> char {
-        self.unified().marker()
+    /// The text a copy reads here, per [`Visible::text_row`].
+    #[must_use]
+    pub fn content_text(&self, side: Option<Side>) -> Option<String> {
+        self.text_row(side).map(Row::text)
     }
 }
 
-impl UnifiedRow for Visible {
-    fn unified(&self) -> &Row {
-        self.row().expect("a unified row")
-    }
-}
-
-/// The split rows of a diff's `rows` (folds as they should show), given its `similar` pairs:
-/// each change block's anchors face each other, the rest face by position.
+/// A diff's rows as split rows: each change block's anchors face each other, the rest by position.
 #[must_use]
-pub fn split_rows(rows: &[Row], similar: &[(u32, u32)]) -> Vec<Visible> {
-    let similar: HashSet<(u32, u32)> = similar.iter().copied().collect();
+pub fn split_rows(rows: Vec<Row>, similar: &[(u32, u32)]) -> Vec<Visible> {
+    // Each old line pairs at most once, so one lookup per deletion.
+    let similar: HashMap<u32, u32> = similar.iter().copied().collect();
+    let blocks = change_blocks(&rows);
     let mut out = Vec::with_capacity(rows.len());
+    let mut rows = rows.into_iter();
     let mut i = 0;
-    for (dels, inss) in change_blocks(rows) {
-        out.extend(rows[i..dels.start].iter().map(unchanged));
-        face(&rows[dels.clone()], &rows[inss.clone()], &similar, &mut out);
+    for (dels, inss) in blocks {
+        out.extend(rows.by_ref().take(dels.start - i).map(unchanged));
+        let old: Vec<Row> = rows.by_ref().take(dels.len()).collect();
+        let new: Vec<Row> = rows.by_ref().take(inss.len()).collect();
+        face(old, new, &similar, &mut out);
         i = inss.end;
     }
-    out.extend(rows[i..].iter().map(unchanged));
+    out.extend(rows.map(unchanged));
     out
 }
 
 /// A row outside any change block: a context line on both halves, or a fold as is.
-fn unchanged(row: &Row) -> Visible {
+fn unchanged(row: Row) -> Visible {
     match row {
-        Row::Context { old_no, new_no, spans } => {
-            let half = |no: u32| Half { no, spans: spans.clone(), emphasis: Vec::new(), cr: false };
-            Visible::Pair(Pair {
-                old: Some(half(*old_no)),
-                new: Some(half(*new_no)),
-                changed: false,
-            })
-        }
-        _ => Visible::Row(row.clone()),
+        Row::Context { .. } => Visible::Pair(Pair::Same(row)),
+        _ => Visible::Row(row),
     }
 }
 
 /// Push one block's pairs: anchors facing, the gaps between them filled by position.
-fn face(dels: &[Row], inss: &[Row], similar: &HashSet<(u32, u32)>, out: &mut Vec<Visible>) {
+fn face(dels: Vec<Row>, inss: Vec<Row>, similar: &HashMap<u32, u32>, out: &mut Vec<Visible>) {
+    let anchors = anchors(&dels, &inss, similar);
+    let (nd, ni) = (dels.len(), inss.len());
+    let mut dels: Vec<Option<Row>> = dels.into_iter().map(Some).collect();
+    let mut inss: Vec<Option<Row>> = inss.into_iter().map(Some).collect();
     let (mut k, mut j) = (0, 0);
-    for (ak, aj) in anchors(dels, inss, similar).into_iter().chain([(dels.len(), inss.len())]) {
+    for (ak, aj) in anchors.into_iter().chain([(nd, ni)]) {
         for g in 0..(ak - k).max(aj - j) {
-            out.push(pair(dels[k..ak].get(g), inss[j..aj].get(g), similar));
+            let old = if k + g < ak { dels[k + g].take() } else { None };
+            let new = if j + g < aj { inss[j + g].take() } else { None };
+            out.push(pair(old, new, similar));
         }
-        if ak < dels.len() {
-            out.push(pair(dels.get(ak), inss.get(aj), similar));
+        if ak < nd {
+            out.push(pair(dels[ak].take(), inss[aj].take(), similar));
         }
         (k, j) = (ak + 1, aj + 1);
     }
 }
 
 /// A changed pair; emphasis paints only on a similar pair that faces.
-fn pair(old: Option<&Row>, new: Option<&Row>, similar: &HashSet<(u32, u32)>) -> Visible {
-    let numbers = old.and_then(Row::old_no).zip(new.and_then(Row::new_no));
-    let faced = numbers.is_some_and(|n| similar.contains(&n));
-    let half = |row: &Row, no: Option<u32>| Half {
-        no: no.unwrap_or_default(),
-        spans: row.spans().to_vec(),
-        emphasis: if faced { row.emphasis().to_vec() } else { Vec::new() },
-        cr: row.cr_marker(),
+fn pair(old: Option<Row>, new: Option<Row>, similar: &HashMap<u32, u32>) -> Visible {
+    let faced = match (old.as_ref().and_then(Row::old_no), new.as_ref().and_then(Row::new_no)) {
+        (Some(o), Some(n)) => similar.get(&o) == Some(&n),
+        _ => false,
     };
-    Visible::Pair(Pair {
-        old: old.map(|r| half(r, r.old_no())),
-        new: new.map(|r| half(r, r.new_no())),
-        changed: true,
-    })
+    let plain = |mut row: Row| {
+        if let Row::Deletion { emphasis, .. } | Row::Insertion { emphasis, .. } = &mut row {
+            emphasis.clear();
+        }
+        row
+    };
+    let (old, new) = if faced { (old, new) } else { (old.map(plain), new.map(plain)) };
+    Visible::Pair(Pair::Changed { old, new })
 }
 
-/// The block's anchors as `(deletion, insertion)` indices: similar pairs and twins unique to
-/// both sides (patience), keeping the longest set that never crosses.
-fn anchors(dels: &[Row], inss: &[Row], similar: &HashSet<(u32, u32)>) -> Vec<(usize, usize)> {
+/// A block's `(deletion, insertion)` anchors: similar pairs and unique twins, the longest uncrossed.
+fn anchors(dels: &[Row], inss: &[Row], similar: &HashMap<u32, u32>) -> Vec<(usize, usize)> {
     let (old, new): (Vec<String>, Vec<String>) =
         (dels.iter().map(Row::text).collect(), inss.iter().map(Row::text).collect());
     let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
@@ -208,10 +182,9 @@ fn anchors(dels: &[Row], inss: &[Row], similar: &HashSet<(u32, u32)>) -> Vec<(us
         if counts[old[k].as_str()] == (1, 1) {
             found.push((k, new_at[old[k].as_str()]));
         }
-        let Some(o) = d.old_no() else { continue };
-        found.extend(
-            similar.iter().filter(|p| p.0 == o).filter_map(|p| Some((k, *ins_at.get(&p.1)?))),
-        );
+        if let Some(&j) = d.old_no().and_then(|o| similar.get(&o)).and_then(|n| ins_at.get(n)) {
+            found.push((k, j));
+        }
     }
     // Within one deletion, larger insertions first, so the increasing run keeps at most one.
     found.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
@@ -256,20 +229,22 @@ mod tests {
         FileDiff::build("a.rs".into(), None, old, new, &hl)
     }
 
-    fn text(half: Option<&super::Half>) -> Option<String> {
-        half.map(|h| h.spans.iter().map(|s| s.text.as_str()).collect())
-    }
-
     /// Each changed pair's `(old, new)` line texts, in order.
     fn changed(rows: &[Visible]) -> Vec<(Option<String>, Option<String>)> {
         rows.iter()
             .filter_map(|v| match v {
-                Visible::Pair(p @ Pair { changed: true, .. }) => {
-                    Some((text(p.old.as_ref()), text(p.new.as_ref())))
+                Visible::Pair(Pair::Changed { old, new }) => {
+                    Some((old.as_ref().map(Row::text), new.as_ref().map(Row::text)))
                 }
                 _ => None,
             })
             .collect()
+    }
+
+    /// Whether either half of a split row carries word emphasis.
+    fn emphasized(v: &Visible) -> bool {
+        let Visible::Pair(Pair::Changed { old, new }) = v else { return false };
+        old.iter().chain(new).any(|r| !r.emphasis().is_empty())
     }
 
     /// Every line of `diff` appears in exactly one split row, on its own side, in order.
@@ -286,9 +261,9 @@ mod tests {
         let mut got: (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
         for v in rows {
             match v {
-                Visible::Pair(p) => {
-                    got.0.extend(p.old.as_ref().map(|h| h.no));
-                    got.1.extend(p.new.as_ref().map(|h| h.no));
+                Visible::Pair(_) => {
+                    got.0.extend(v.old_no());
+                    got.1.extend(v.new_no());
                 }
                 Visible::Row(Row::Fold { lines }) => {
                     got.0.extend(lines.iter().filter_map(Row::old_no));
@@ -303,7 +278,7 @@ mod tests {
     #[test]
     fn a_rewrite_faces_its_lines_by_position() {
         let d = build("keep\nalpha one\nbeta two\ngamma three\n", "keep\nzzz\nyyy\n");
-        let rows = split_rows(&d.rows, &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.similar);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
@@ -313,13 +288,13 @@ mod tests {
                 (Some("gamma three".into()), None),
             ]
         );
-        assert!(matches!(&rows[0], Visible::Pair(Pair { changed: false, .. })), "context stays");
+        assert!(matches!(&rows[0], Visible::Pair(Pair::Same(_))), "context stays");
     }
 
     #[test]
     fn a_similar_pair_faces_its_partner_past_an_inserted_line() {
         let d = build("let total = sum + 1;\n", "let fresh = 0;\nlet total = sum + 2;\n");
-        let rows = split_rows(&d.rows, &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.similar);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
@@ -328,10 +303,46 @@ mod tests {
                 (Some("let total = sum + 1;".into()), Some("let total = sum + 2;".into())),
             ]
         );
-        let Visible::Pair(p) = &rows[1] else { panic!() };
-        assert!(
-            !p.new.as_ref().unwrap().emphasis.is_empty(),
-            "a facing similar pair keeps emphasis"
+        assert!(emphasized(&rows[1]), "a facing similar pair keeps emphasis");
+    }
+
+    #[test]
+    fn a_unique_twin_anchors_past_an_inserted_line() {
+        // The endings differ, so the twins stay in the block; position alone would stagger them.
+        let d = build("a\r\nb\r\n", "x\na\nb\n");
+        let rows = split_rows(d.rows.clone(), &d.similar);
+        assert_each_line_once(&d, &rows);
+        assert_eq!(
+            changed(&rows),
+            [
+                (None, Some("x".into())),
+                (Some("a".into()), Some("a".into())),
+                (Some("b".into()), Some("b".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_longest_non_crossing_anchors_win_over_the_first() {
+        // A moved twin leads the old side, crossing three similar pairs; the three win.
+        let old = "unique_line();\r\nlet total1 = sum + 1;\nlet total2 = sum + 1;\nlet total3 = sum + 1;\n";
+        let new =
+            "let total1 = sum + 2;\nlet total2 = sum + 2;\nlet total3 = sum + 2;\nunique_line();\n";
+        let d = build(old, new);
+        let rows = split_rows(d.rows.clone(), &d.similar);
+        assert_each_line_once(&d, &rows);
+        let pair = |i: usize| {
+            (Some(format!("let total{i} = sum + 1;")), Some(format!("let total{i} = sum + 2;")))
+        };
+        assert_eq!(
+            changed(&rows),
+            [
+                (Some("unique_line();".into()), None),
+                pair(1),
+                pair(2),
+                pair(3),
+                (None, Some("unique_line();".into())),
+            ]
         );
     }
 
@@ -343,32 +354,28 @@ mod tests {
             "unique_line();\nlet total = sum + 2;\n",
         );
         assert_eq!(d.pairs.len(), 2, "pair_homologs crosses them: {:?}", d.pairs);
-        let rows = split_rows(&d.rows, &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.similar);
         assert_each_line_once(&d, &rows);
         for v in &rows {
-            let Visible::Pair(p) = v else { continue };
-            let (old, new) = (text(p.old.as_ref()), text(p.new.as_ref()));
-            let faces_partner = old.as_deref() == Some("let total = sum + 1;")
-                && new.as_deref() == Some("let total = sum + 2;");
-            let emphasized = p.old.iter().chain(&p.new).any(|h| !h.emphasis.is_empty());
-            assert_eq!(
-                emphasized, faces_partner,
-                "emphasis only where the similar pair faces: {p:?}"
-            );
+            let Visible::Pair(Pair::Changed { old, new }) = v else { continue };
+            let faces_partner = old.as_ref().map(Row::text).as_deref()
+                == Some("let total = sum + 1;")
+                && new.as_ref().map(Row::text).as_deref() == Some("let total = sum + 2;");
+            assert_eq!(emphasized(v), faces_partner, "emphasis only where the pair faces: {v:?}");
         }
     }
 
     #[test]
     fn a_line_ending_change_faces_its_twin_with_the_cr_marker() {
         let d = build("a\r\nb\r\n", "a\nb\n");
-        let rows = split_rows(&d.rows, &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.similar);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
             [(Some("a".into()), Some("a".into())), (Some("b".into()), Some("b".into()))]
         );
-        let Visible::Pair(p) = &rows[0] else { panic!() };
-        assert!(p.old.as_ref().unwrap().cr, "the old half keeps its CR marker");
+        let Visible::Pair(Pair::Changed { old: Some(old), .. }) = &rows[0] else { panic!() };
+        assert!(old.cr_marker(), "the old half keeps its CR marker");
     }
 
     #[test]
@@ -389,7 +396,7 @@ mod tests {
         }
         let d = build(&old, &new);
         assert!(d.pairs.len() > d.similar.len() + 100, "the block holds many twins");
-        let rows = split_rows(&d.rows, &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.similar);
         assert_each_line_once(&d, &rows);
         // Non-unique twins never anchor, so no run of one-sided rows staggers the block.
         let mut one_sided = 0;

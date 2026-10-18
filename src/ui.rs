@@ -460,8 +460,19 @@ fn seg_cell_range(
         let segs = wrap_segments(cells, code_width.max(1), ContinuationSpaces::Trim);
         segs.get(seg).copied().unwrap_or((0, 0))
     } else {
-        (skip_columns(cells, app.h_scroll), cells.len())
+        unwrapped_range(cells, app.h_scroll, code_width)
     }
+}
+
+/// The cells an unwrapped row paints: past `h_scroll`, up to `code_width`, no wide glyph split.
+fn unwrapped_range(cells: &[Cell], h_scroll: usize, code_width: usize) -> (usize, usize) {
+    let start = skip_columns(cells, h_scroll);
+    let mut col = 0;
+    let fits = cells[start..].iter().take_while(|c| {
+        col += c.w;
+        col <= code_width
+    });
+    (start, start + fits.count())
 }
 
 /// The source char at a display column, past the end clamping to the last char.
@@ -516,8 +527,7 @@ pub fn read_content_rect(area: Rect, app: &App) -> Rect {
     inner
 }
 
-/// The selection point under `(col, row)` on a code line of the read pane, with the half it is
-/// in on a split row.
+/// The selection point under `(col, row)` on a code line of the read pane, and its split half.
 #[must_use]
 pub fn read_point_at(
     area: Rect,
@@ -541,12 +551,11 @@ pub fn read_point_at(
     // The gutter is chrome with its own gestures.
     let col_in_code = (col as usize).checked_sub(x0 + pane.prefix_w)?;
     let code_width = width.saturating_sub(pane.prefix_w).max(1);
-    let chr = seg_char_at(app, &r, seg, code_width, col_in_code);
+    let chr = seg_char_at(app, r, seg, code_width, col_in_code);
     Some((side, crate::selection::Point { row: li, chr }))
 }
 
-/// `read_point_at` for a drag's moving end, clamped to the nearest code line (`TS-ONE-SURFACE`)
-/// and to `side`'s half of a split row.
+/// `read_point_at` for a drag's moving end, clamped to the nearest code line in `side`'s half.
 #[must_use]
 pub fn read_point_clamped(
     area: Rect,
@@ -573,15 +582,16 @@ pub fn read_point_clamped(
         return Some(crate::selection::Point { row: li, chr: 0 });
     };
     let code_width = width.saturating_sub(pane.prefix_w).max(1);
-    let col_in_code = (col as usize).saturating_sub(x0 + pane.prefix_w);
+    // Past its half, a drag reads that half's last painted cell, never the text behind the divider.
+    let col = (col as usize).min(x0 + width.saturating_sub(1));
+    let col_in_code = col.saturating_sub(x0 + pane.prefix_w);
     Some(crate::selection::Point {
         row: li,
-        chr: seg_char_at(app, &r, seg, code_width, col_in_code),
+        chr: seg_char_at(app, r, seg, code_width, col_in_code),
     })
 }
 
-/// The commentable row whose gutter `(col, row)` lands on, continuation lines included; a split
-/// row has one per half.
+/// The commentable row whose gutter `(col, row)` lands on, continuation lines and halves included.
 #[must_use]
 pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
     if app.tab == Tab::Pr {
@@ -596,9 +606,14 @@ pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize>
         return None;
     };
     let in_gutter = |x0: usize| (x0..x0 + pane.prefix_w).contains(&(col as usize));
-    let right =
-        matches!(app.visible[li], Visible::Pair(_)) && in_gutter(half_column(&pane, Side::New).0);
-    (app.visible[li].is_content() && (in_gutter(pane.inner.x as usize) || right)).then_some(li)
+    // A blank half paints no gutter, so it takes no gutter gesture.
+    let hit = match &app.visible[li] {
+        Visible::Pair(p) => [Side::Old, Side::New]
+            .into_iter()
+            .any(|side| p.half(side).is_some() && in_gutter(half_column(&pane, side).0)),
+        Visible::Row(row) => row.is_content() && in_gutter(pane.inner.x as usize),
+    };
+    hit.then_some(li)
 }
 
 /// Paint one selected cell on the selection fill; text on a match or caret becomes body text.
@@ -654,29 +669,21 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
                     continue;
                 };
                 let code_width = width.saturating_sub(pane.prefix_w).max(1);
-                let cells = plain_cells(&row_ref);
-                let (seg_s, seg_e) = seg_cell_range(app, &row_ref, &cells, seg, code_width);
+                let cells = plain_cells(row_ref);
+                let (seg_s, seg_e) = seg_cell_range(app, row_ref, &cells, seg, code_width);
                 let y = pane.inner.y + off as u16;
                 let max_x = x0 + width;
                 let mut x = x0 + pane.prefix_w;
                 for painted in &cells[seg_s..seg_e] {
                     let sel = (li > lo.row || painted.src >= lo.chr)
                         && (li < hi.row || painted.src <= hi.chr);
-                    if sel {
-                        for dx in 0..painted.w {
-                            // A straddling wide char never tints the border.
-                            if x + dx >= max_x {
-                                break;
-                            }
-                            if let Some(cell) = frame.buffer_mut().cell_mut(((x + dx) as u16, y)) {
-                                paint_selected(cell, p);
-                            }
+                    // A rendered line wider than its pane is clipped there, and so is its tint.
+                    for x in (x..x + painted.w).take_while(|&x| x < max_x).filter(|_| sel) {
+                        if let Some(cell) = frame.buffer_mut().cell_mut((x as u16, y)) {
+                            paint_selected(cell, p);
                         }
                     }
                     x += painted.w;
-                    if x >= max_x {
-                        break;
-                    }
                 }
             }
         }
@@ -1810,6 +1817,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         expand_hint: &expand_hint,
         rendered: app.rendered_lines(),
         see: &see,
+        numbered: Side::New,
     };
     // One comment→row walk feeds both the marks and the card splice.
     let (cards, commented) = app.comment_marks();
@@ -1937,7 +1945,7 @@ fn half_widths(width: usize) -> (usize, usize) {
 }
 
 /// A pair's halves as rows, old then new; a blank half is `None`.
-fn pair_rows(p: &Pair) -> [Option<Row>; 2] {
+fn pair_rows(p: &Pair) -> [Option<&Row>; 2] {
     [p.half(Side::Old), p.half(Side::New)]
 }
 
@@ -1960,25 +1968,31 @@ fn side_at(pane: &ReadPane, col: u16) -> Option<Side> {
     }
 }
 
-/// A read-pane row's text column: its left edge, width and content row, a split row's on
-/// `side`; a fold, a blank half or a sideless split row has none.
+/// A read-pane row's text column: its left edge, width and [`Visible::text_row`].
 fn text_column<'a>(
     app: &'a App,
     pane: &ReadPane,
     li: usize,
     side: Option<Side>,
-) -> Option<(usize, usize, std::borrow::Cow<'a, Row>)> {
-    let (x0, width, row) = match (app.visible.get(li)?, side) {
-        (Visible::Row(r), _) => {
-            (pane.inner.x as usize, pane.inner.width as usize, std::borrow::Cow::Borrowed(r))
-        }
-        (Visible::Pair(p), Some(side)) => {
-            let (x0, width) = half_column(pane, side);
-            (x0, width, std::borrow::Cow::Owned(p.half(side)?))
-        }
-        (Visible::Pair(_), None) => return None,
+) -> Option<(usize, usize, &'a Row)> {
+    let v = app.visible.get(li)?;
+    let row = v.text_row(side)?;
+    let (x0, width) = match (v, side) {
+        (Visible::Pair(_), Some(side)) => half_column(pane, side),
+        _ => (pane.inner.x as usize, pane.inner.width as usize),
     };
-    row.is_content().then_some((x0, width, row))
+    Some((x0, width, row))
+}
+
+/// The columns a text drag on `side` scrolls sideways past: its split half, else the read pane.
+#[must_use]
+pub fn read_drag_columns(area: Rect, app: &App, side: Option<Side>) -> (u16, u16) {
+    let pane = read_pane(area, app);
+    let (x0, width) = match side.filter(|_| app.split_on_screen()) {
+        Some(side) => half_column(&pane, side),
+        None => (pane.inner.x as usize, pane.inner.width as usize),
+    };
+    (x0 as u16, (x0 + width) as u16)
 }
 
 /// A painted row's display height: a split row is as tall as its taller half.
@@ -1989,7 +2003,7 @@ fn visible_height(v: &Visible, gutter_w: usize, width: usize, wrap: bool) -> usi
             let (l, r) = half_widths(width);
             let [old, new] = pair_rows(p);
             let height =
-                |row: Option<Row>, w: usize| row.map_or(0, |r| row_height(&r, gutter_w, w, wrap));
+                |row: Option<&Row>, w: usize| row.map_or(0, |r| row_height(r, gutter_w, w, wrap));
             height(old, l).max(height(new, r)).max(1)
         }
     }
@@ -2000,7 +2014,7 @@ fn visible_code_width(v: &Visible) -> usize {
     let cells = |row: &Row| -> usize { plain_cells(row).iter().map(|c| c.w).sum() };
     match v {
         Visible::Row(row) => cells(row),
-        Visible::Pair(p) => pair_rows(p).iter().flatten().map(cells).max().unwrap_or(0),
+        Visible::Pair(p) => pair_rows(p).into_iter().flatten().map(cells).max().unwrap_or(0),
     }
 }
 
@@ -2011,11 +2025,11 @@ fn render_visible(v: &Visible, layout: RowLayout<'_>, state: RowState) -> Vec<Li
         Visible::Pair(p) => p,
     };
     let (lw, rw) = half_widths(layout.width);
-    let half = |row: &Option<Row>, width: usize| {
-        row.as_ref().map(|r| render_row(r, RowLayout { width, ..layout }, state))
+    let half = |row: Option<&Row>, width: usize, numbered: Side| {
+        row.map(|r| render_row(r, RowLayout { width, numbered, ..layout }, state))
     };
     let [old, new] = pair_rows(p);
-    let (left, right) = (half(&old, lw), half(&new, rw));
+    let (left, right) = (half(old, lw, Side::Old), half(new, rw, Side::New));
     let rows = left.as_ref().map_or(0, Vec::len).max(right.as_ref().map_or(0, Vec::len)).max(1);
     // A blank half is the terminal's, unless the cursor or selection paints across it.
     let on = row_fill(state.cursor, state.selected, layout.focused, Fill::Base);
@@ -2065,6 +2079,8 @@ struct RowLayout<'a> {
     rendered: &'a [Line<'static>],
     /// The `rendered` key's label a don't-render marker names, following a rebind.
     see: &'a str,
+    /// The side whose number the gutter shows first: old in a split row's left half, else new.
+    numbered: Side,
 }
 
 /// A row's per-row highlight state.
@@ -2093,6 +2109,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         expand_hint,
         rendered,
         see,
+        numbered,
     } = layout;
     let RowState { commented, cursor, selected, hovered, lead } = state;
     // A commented line's number wears your comment color; others are muted.
@@ -2168,9 +2185,10 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         return vec![line.style(Style::default().bg(pal.fill(on)).add_modifier(Modifier::BOLD))];
     }
     // `0` is an unnumbered PR snippet row; file diffs are 1-based.
+    let other = if numbered == Side::New { Side::Old } else { Side::New };
     let num = row
-        .new_no()
-        .or_else(|| row.old_no())
+        .no(numbered)
+        .or_else(|| row.no(other))
         .filter(|&n| n > 0)
         .map_or(String::new(), |n| n.to_string());
     let (bar, bar_ink, tint) = match row.marker() {
@@ -2206,7 +2224,8 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
             .map(|(s, e)| &cells[s..e])
             .collect()
     } else {
-        vec![cells.get(skip_columns(&cells, h_scroll)..).unwrap_or(&[])]
+        let (start, end) = unwrapped_range(&cells, h_scroll, code_width);
+        vec![&cells[start..end]]
     };
 
     chunks
@@ -4634,6 +4653,7 @@ fn push_finding_quote(
             expand_hint: "",
             rendered: &[],
             see: "",
+            numbered: Side::New,
         };
         let from = lines.len();
         for row in &rows {

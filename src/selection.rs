@@ -63,8 +63,7 @@ impl TextDrag {
     }
 }
 
-/// A `Read` selection's text: each spanned line once, split rows' on `side`, cut at the ends,
-/// folds and blank halves skipped.
+/// A `Read` selection's text: each spanned line once, on `side`, cut at the ends, gaps skipped.
 #[must_use]
 pub fn read_text(rows: &[Visible], side: Option<Side>, a: Point, b: Point) -> String {
     let hi_row = b.row.min(rows.len().saturating_sub(1));
@@ -150,7 +149,7 @@ pub fn copied_status(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::diff::{Row, Span};
-    use crate::split::{Half, Pair};
+    use crate::split::Pair;
 
     fn spans(text: &str) -> Vec<Span> {
         vec![Span { text: text.into(), color: (0, 0, 0) }]
@@ -164,12 +163,20 @@ mod tests {
         Visible::Row(context(text))
     }
 
+    fn deletion(text: &str) -> Row {
+        Row::Deletion { old_no: 1, spans: spans(text), emphasis: vec![], cr: false }
+    }
+
+    fn insertion(text: &str) -> Row {
+        Row::Insertion { new_no: 1, spans: spans(text), emphasis: vec![], cr: false }
+    }
+
     fn del(text: &str) -> Visible {
-        Visible::Row(Row::Deletion { old_no: 1, spans: spans(text), emphasis: vec![], cr: false })
+        Visible::Row(deletion(text))
     }
 
     fn ins(text: &str) -> Visible {
-        Visible::Row(Row::Insertion { new_no: 1, spans: spans(text), emphasis: vec![], cr: false })
+        Visible::Row(insertion(text))
     }
 
     fn fold(hidden: usize) -> Visible {
@@ -210,14 +217,12 @@ mod tests {
 
     #[test]
     fn read_text_on_split_rows_reads_one_half_and_skips_blank_halves() {
-        let half = |no, text: &str| Half { no, spans: spans(text), emphasis: vec![], cr: false };
-        let pair =
-            |old: Option<Half>, new: Option<Half>| Visible::Pair(Pair { old, new, changed: true });
+        let pair = |old: Option<Row>, new: Option<Row>| Visible::Pair(Pair::Changed { old, new });
         let rows = vec![
-            pair(Some(half(1, "old one")), Some(half(1, "new one"))),
-            pair(None, Some(half(2, "added"))),
+            pair(Some(deletion("old one")), Some(insertion("new one"))),
+            pair(None, Some(insertion("added"))),
             fold(2),
-            pair(Some(half(5, "gone")), None),
+            pair(Some(deletion("gone")), None),
         ];
         let (a, b) = (point(0, 4), point(3, 99));
         assert_eq!(read_text(&rows, Some(Side::Old), a, b), "one\ngone");

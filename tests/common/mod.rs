@@ -251,6 +251,25 @@ pub fn app_on_split(repo: &Repo) -> App {
     app_on_config(repo, "diff_view = \"split\"\n")
 }
 
+/// A unified row's content, for tests that read unified rows; panics on a split pair.
+pub trait UnifiedRow {
+    fn unified(&self) -> &herdr_reviewr::diff::Row;
+
+    fn text(&self) -> String {
+        self.unified().text()
+    }
+
+    fn marker(&self) -> char {
+        self.unified().marker()
+    }
+}
+
+impl UnifiedRow for herdr_reviewr::split::Visible {
+    fn unified(&self) -> &herdr_reviewr::diff::Row {
+        self.row().expect("a unified row")
+    }
+}
+
 /// A fresh pane over `repo`, seeded from a config file holding `toml`.
 fn app_on_config(repo: &Repo, toml: &str) -> App {
     let dir = tempfile::tempdir().unwrap();

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Repo, app_on, app_on_rendered, app_on_split, enter_tab};
+use common::{Repo, UnifiedRow as _, app_on, app_on_rendered, app_on_split, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::diff::{Bar, MarkerKind};
@@ -10,7 +10,6 @@ use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
 use herdr_reviewr::roles::{Fill, Ink};
-use herdr_reviewr::split::UnifiedRow as _;
 use herdr_reviewr::ui::{self, HeaderHit};
 use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::Terminal;
@@ -4973,6 +4972,12 @@ fn split_shows_only_where_it_fits_and_keeps_the_choice() {
 
     let out = dump(&split_frame(&mut app, 142));
     assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "the choice outlives a narrow spell");
+
+    // A 135-column read pane is the narrowest that splits.
+    let out = dump(&split_frame(&mut app, 136));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 0, "134 inner columns show unified: {out}");
+    let out = dump(&split_frame(&mut app, 137));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "135 inner columns split: {out}");
 }
 
 #[test]
@@ -5038,13 +5043,13 @@ fn a_file_growing_past_999_lines_keeps_split() {
     r.write("big.txt", &lines(998, "middle new"));
     let mut app = app_on_split(&r);
     app.toggle_navigator_hidden();
-    split_frame(&mut app, 142);
+    split_frame(&mut app, 137);
     assert!(app.split_on_screen());
 
     r.write("big.txt", &lines(1010, "middle new"));
     app.reload().unwrap();
-    split_frame(&mut app, 142);
-    assert!(app.split_on_screen(), "a four-digit gutter fits the same width");
+    split_frame(&mut app, 137);
+    assert!(app.split_on_screen(), "a four-digit gutter fits the narrowest split");
 }
 
 #[test]
@@ -5113,6 +5118,22 @@ fn a_split_row_wraps_as_tall_as_its_taller_half() {
 }
 
 #[test]
+fn an_unwrapped_long_half_stops_at_the_divider() {
+    let r = Repo::init();
+    r.write("w.rs", &format!("{}\nkeep\n", "x".repeat(120)));
+    r.commit_all("init");
+    r.write("w.rs", "short\nkeep\n");
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.wrap = false;
+    let out = dump(&split_frame(&mut app, 142));
+    let line = out.lines().find(|l| l.contains("short")).unwrap();
+    let (left, right) = halves(line);
+    assert!(left.ends_with('x'), "the old half runs to its edge: {left:?}");
+    assert!(!right.contains('x'), "and no further: {right:?}");
+}
+
+#[test]
 fn the_split_key_shows_where_it_acts_and_names_its_destination() {
     let r = split_repo();
     let mut app = app_on(&r);
@@ -5155,6 +5176,33 @@ fn a_split_text_selection_paints_only_its_column() {
     };
     assert_eq!(selected(71..141), 9, "`let total` in the new column");
     assert_eq!(selected(1..70), 0, "nothing in the old column");
+}
+
+#[test]
+fn a_rendered_line_wider_than_the_pane_never_tints_the_border() {
+    use herdr_reviewr::selection::{Point, Surface, TextDrag};
+    let r = Repo::init();
+    r.write("doc.md", "# T\n");
+    r.commit_all("init");
+    r.write("doc.md", &format!("> > > > > > > > - - - - - - - - {}\n", "x".repeat(30)));
+    let mut app = app_on_rendered(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Files;
+    render_size(&app, 40, 20);
+    let row = app.visible.len() - 1;
+    app.gesture = herdr_reviewr::selection::Gesture::Text {
+        drag: TextDrag {
+            surface: Surface::Read { side: None },
+            anchor: Point { row, chr: 0 },
+            extent: Point { row, chr: 999 },
+        },
+        count: 1,
+    };
+    let buf = render_size(&app, 40, 20);
+    let y = dump(&buf).lines().position(|l| l.contains('x')).unwrap() as u16;
+    let sel_bg = app.palette().fill(Fill::Selection);
+    assert!(buf.cell((38, y)).unwrap().style().bg == Some(sel_bg), "the line is selected");
+    assert!(buf.cell((39, y)).unwrap().style().bg != Some(sel_bg), "the border keeps its fill");
 }
 
 #[test]

@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use common::{Repo, app_on, app_on_rendered, enter_tab, typed};
+use common::{Repo, UnifiedRow as _, app_on, app_on_rendered, enter_tab, typed};
 use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::diff::{Bar, MarkerKind, RenderedKind, Row};
@@ -14,7 +14,7 @@ use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
 use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingCode, Keymap};
 use herdr_reviewr::model::{Scope, Side};
-use herdr_reviewr::split::{UnifiedRow as _, Visible};
+use herdr_reviewr::split::Visible;
 use herdr_reviewr::turn::Status;
 use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::crossterm::event::{
@@ -4931,6 +4931,7 @@ fn the_worker_coalesces_queued_jobs_keeping_their_flags() {
 
 mod search_overlay {
     use super::{common, press};
+    use crate::common::UnifiedRow as _;
     use common::{Repo, app_on, app_on_rendered, enter_tab};
     use herdr_reviewr::app::{App, Focus, Mode, SearchPhase, Tab};
     use herdr_reviewr::keymap::{Keymap, default_keymap};
@@ -4938,7 +4939,6 @@ mod search_overlay {
     use herdr_reviewr::search::{
         CodeHit, FileHit, SearchCompletion, SearchJob, SearchOutcome, SearchResults,
     };
-    use herdr_reviewr::split::UnifiedRow as _;
     use ratatui::crossterm::event::KeyCode;
 
     fn results(files: Vec<FileHit>, code: Vec<CodeHit>) -> SearchResults {
@@ -6642,14 +6642,19 @@ fn last_copy() -> Option<String> {
     SEL_COPIES.with(|c| c.borrow().last().cloned())
 }
 
-/// Paint a frame, then dispatch one mouse event, as the event loop does.
-fn sel_mouse(app: &mut App, kind: MouseEventKind, col: u16, row: u16) {
-    let backend = ratatui::backend::TestBackend::new(SEL_AREA.width, SEL_AREA.height);
+/// Paint a frame of `area`, then dispatch one mouse event, as the event loop does.
+fn mouse_in(area: Rect, app: &mut App, kind: MouseEventKind, col: u16, row: u16) {
+    let backend = ratatui::backend::TestBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| herdr_reviewr::ui::render(f, app)).unwrap();
-    let heights = herdr_reviewr::ui::diff_row_heights(app, SEL_AREA);
+    let heights = herdr_reviewr::ui::diff_row_heights(app, area);
     let event = MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE };
-    handle_mouse(app, event, SEL_AREA, &heights, &Keymap::default(), &SelClipboard).unwrap();
+    handle_mouse(app, event, area, &heights, &Keymap::default(), &SelClipboard).unwrap();
+}
+
+/// [`mouse_in`] the selection tests' frame.
+fn sel_mouse(app: &mut App, kind: MouseEventKind, col: u16, row: u16) {
+    mouse_in(SEL_AREA, app, kind, col, row);
 }
 
 /// The screen cell of `(row, display column)`, past a 5-cell gutter.
@@ -10490,7 +10495,7 @@ fn cursor_lines(app: &App) -> (Option<u32>, Option<u32>) {
 
 fn cursor_to(app: &mut App, lines: (Option<u32>, Option<u32>)) {
     app.focus = Focus::Diff;
-    app.diff_cursor = app.visible.iter().position(|v| (v.old_no(), v.new_no()) == lines).unwrap();
+    app.diff_cursor = row_of(app, lines);
 }
 
 #[test]
@@ -10510,6 +10515,66 @@ fn split_and_back_keeps_the_cursor_on_its_line() {
         assert!(!app.split_on_screen());
         assert_eq!(cursor_lines(&app), start, "back on the side it left from");
     }
+}
+
+#[test]
+fn a_tab_round_trip_keeps_the_side_a_switch_came_from() {
+    let keymap = Keymap::default();
+    let r = split_flow_repo();
+    let mut app = app_on(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(2), None));
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
+    enter_tab(&mut app, herdr_reviewr::app::Tab::Changes);
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert_eq!(cursor_lines(&app), (Some(2), None), "back on the deletion it left");
+}
+
+#[test]
+fn the_split_key_goes_where_its_label_points_while_a_selection_holds_unified() {
+    let keymap = Keymap::default();
+    let r = split_flow_repo();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(90);
+    app.focus = Focus::Diff;
+    app.toggle_select();
+    app.sync_split_width(140);
+    assert!(!app.split_on_screen(), "the selection holds unified");
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(app.split_on_screen(), "`| split` shows split");
+}
+
+#[test]
+fn rendered_back_to_source_splits_in_the_same_rebuild() {
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\nold para\n\nkeep\n");
+    r.commit_all("init");
+    r.write("doc.md", "# T\n\nnew para\n\nkeep\n");
+    let keymap = Keymap::default();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(3), Some(3)));
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.rendered_active());
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.split_on_screen(), "split before the next frame's sync");
+    assert_eq!(cursor_lines(&app), (Some(3), Some(3)));
+}
+
+#[test]
+fn a_cursor_that_left_its_row_forgets_the_side_it_switched_from() {
+    let keymap = Keymap::default();
+    let r = split_flow_repo();
+    let mut app = app_on(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(2), None));
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    press(&mut app, &keymap, KeyCode::Char('j'));
+    press(&mut app, &keymap, KeyCode::Char('k'));
+    assert_eq!(cursor_lines(&app), (Some(2), Some(2)));
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert_eq!(cursor_lines(&app), (None, Some(2)), "a split row lands on its new line");
 }
 
 #[test]
@@ -10608,6 +10673,188 @@ fn diff_view_split_opens_split_and_a_reread_never_flips_it() {
     assert!(app.split_on_screen(), "a reread never flips a running pane");
 }
 
+#[test]
+fn a_diff_with_no_changed_line_offers_no_split_and_keeps_the_choice() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = Repo::init();
+    r.write("a.sh", "echo hi\n");
+    r.write("b.rs", "a\nb\n");
+    r.commit_all("init");
+    std::fs::set_permissions(r.path().join("a.sh"), std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+    r.write("b.rs", "a\nB\n");
+    let keymap = Keymap::default();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    assert_eq!(app.diff_path.as_deref(), Some("a.sh"), "the mode change opens first");
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    app.next_file();
+    app.sync_split_width(140);
+    assert!(app.split_on_screen(), "`|` on a file with no changed line never took the choice");
+}
+
+#[test]
+fn a_comment_edited_from_the_list_opens_its_file_split_where_it_fits() {
+    let r = Repo::init();
+    r.write("a.rs", "a\nb\n");
+    r.write("b.rs", "c\nd\n");
+    r.commit_all("init");
+    r.write("a.rs", "a\nB\n");
+    r.write("b.rs", "c\nD\n");
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    let row = row_of(&app, (Some(2), Some(2)));
+    comment_rows(&mut app, (row, row));
+    app.next_file();
+    app.sync_split_width(140);
+    assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
+
+    app.open_list();
+    app.start_edit();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    assert!(app.split_on_screen(), "the file opens split, its edit box over its split row");
+    assert_eq!(cursor_lines(&app), (Some(2), Some(2)));
+}
+
+#[test]
+fn a_fold_inside_a_split_comment_stays_outside_it() {
+    let r = Repo::init();
+    let lines: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+    r.write("a.rs", &(lines.join("\n") + "\n"));
+    r.commit_all("init");
+    let mut changed = lines.clone();
+    changed[1] = "line two".into();
+    changed[18] = "line nineteen".into();
+    r.write("a.rs", &(changed.join("\n") + "\n"));
+    let keymap = Keymap::default();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    let (two, nineteen) = (row_of(&app, (Some(2), Some(2))), row_of(&app, (Some(19), Some(19))));
+    comment_rows(&mut app, (two, nineteen));
+    let is_fold = |i: &usize| matches!(app.visible[*i].row(), Some(Row::Fold { .. }));
+    let fold = (two..nineteen).find(is_fold).unwrap();
+
+    app.diff_cursor = fold;
+    press(&mut app, &keymap, KeyCode::Char('e'));
+    assert_eq!(app.mode, Mode::Normal, "the fold holds no line of the comment, so no edit opens");
+}
+
+#[test]
+fn hunk_steps_and_goto_line_land_on_split_rows() {
+    let r = Repo::init();
+    let lines: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+    r.write("a.rs", &(lines.join("\n") + "\n"));
+    r.commit_all("init");
+    let mut changed = lines.clone();
+    changed[1] = "line two".into();
+    changed[18] = "line nineteen".into();
+    r.write("a.rs", &(changed.join("\n") + "\n"));
+    let keymap = Keymap::default();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+    press(&mut app, &keymap, KeyCode::Char(']'));
+    assert_eq!(cursor_lines(&app), (Some(2), Some(2)));
+    press(&mut app, &keymap, KeyCode::Char(']'));
+    assert_eq!(cursor_lines(&app), (Some(19), Some(19)));
+    press(&mut app, &keymap, KeyCode::Char('['));
+    assert_eq!(cursor_lines(&app), (Some(2), Some(2)));
+
+    app.goto_line(10);
+    assert!(app.split_on_screen());
+    assert_eq!(cursor_lines(&app), (Some(10), Some(10)), "`:10` opens the fold onto its split row");
+}
+
+#[test]
+fn split_to_unified_lands_a_changed_row_on_its_new_line_else_its_old() {
+    let keymap = Keymap::default();
+    let r = rewrite_repo();
+    for (from, to) in [((Some(2), Some(2)), (None, Some(2))), ((Some(3), None), (Some(3), None))] {
+        let mut app = split_pane(&r);
+        cursor_to(&mut app, from);
+        press(&mut app, &keymap, KeyCode::Char('|'));
+        assert!(!app.split_on_screen());
+        assert_eq!(cursor_lines(&app), to, "from {from:?}");
+    }
+}
+
+#[test]
+fn the_split_key_is_inert_where_nothing_can_split() {
+    let keymap = Keymap::default();
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\nold\n");
+    r.write("z.rs", "a\nb\n");
+    r.commit_all("init");
+    r.write("added.rs", "fn added() {}\n");
+    r.write("doc.md", "# T\n\nnew\n");
+    r.write("z.rs", "a\nB\n");
+    let mut app = app_on(&r);
+    app.sync_split_width(140);
+    assert_eq!(app.diff_path.as_deref(), Some("added.rs"));
+    app.focus = Focus::Diff;
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    app.next_file();
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.rendered_active());
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    enter_tab(&mut app, herdr_reviewr::app::Tab::Changes);
+    app.next_file();
+    app.sync_split_width(140);
+    assert_eq!(app.diff_path.as_deref(), Some("z.rs"));
+    assert!(!app.split_on_screen(), "no inert `|` took the choice");
+}
+
+#[test]
+fn a_divider_drag_holds_the_layout_until_release() {
+    let r = split_flow_repo();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    app.start_divider_drag();
+    app.sync_split_width(90);
+    assert!(app.split_on_screen(), "a width flip waits while the divider moves");
+    app.finish_divider_drag();
+    app.sync_split_width(90);
+    assert!(!app.split_on_screen(), "and lands on release");
+
+    app.sync_split_width(140);
+    app.start_divider_drag();
+    app.cancel_divider_drag();
+    app.sync_split_width(90);
+    assert!(!app.split_on_screen(), "a cancelled drag moves nothing, so it holds nothing");
+}
+
+#[test]
+fn the_split_key_leaves_a_held_split_in_a_narrow_pane() {
+    let keymap = Keymap::default();
+    let r = split_flow_repo();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    app.focus = Focus::Diff;
+    app.toggle_select();
+    app.sync_split_width(90);
+    assert!(app.split_on_screen(), "the selection holds split");
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(!app.split_on_screen(), "`|` still leaves the split it advertises");
+}
+
+#[test]
+fn markdown_that_renders_nothing_splits_its_source() {
+    let r = Repo::init();
+    r.write("c.md", "<!-- one -->\n");
+    r.commit_all("init");
+    r.write("c.md", "<!-- two -->\n");
+    let keymap = Keymap::default();
+    let mut app = app_on_rendered(&r);
+    app.sync_split_width(140);
+    assert!(!app.rendered_active(), "nothing renders, so source shows");
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(app.split_on_screen(), "source rows split like any diff");
+}
+
 const SPLIT_AREA: Rect = Rect::new(0, 0, 160, 30);
 
 /// A rewrite: `old one` faces `new one`, `old two` faces nothing, `old three` faces `new three`.
@@ -10628,14 +10875,9 @@ fn split_pane(r: &Repo) -> App {
     app
 }
 
-/// Paint a split frame, then dispatch one mouse event, as the event loop does.
+/// [`mouse_in`] the split tests' frame.
 fn split_mouse(app: &mut App, kind: MouseEventKind, (col, row): (u16, u16)) {
-    let backend = ratatui::backend::TestBackend::new(SPLIT_AREA.width, SPLIT_AREA.height);
-    let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|f| herdr_reviewr::ui::render(f, app)).unwrap();
-    let heights = herdr_reviewr::ui::diff_row_heights(app, SPLIT_AREA);
-    let event = MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE };
-    handle_mouse(app, event, SPLIT_AREA, &heights, &Keymap::default(), &SelClipboard).unwrap();
+    mouse_in(SPLIT_AREA, app, kind, col, row);
 }
 
 /// A click: press and release on one cell.
@@ -10831,4 +11073,86 @@ fn a_drag_in_the_right_gutter_selects_rows() {
     assert_eq!(app.selection_range(), (one, three));
     split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), end);
     assert!(app.composing(), "the gutter release opens the composer");
+}
+
+#[test]
+fn a_text_drag_past_the_divider_copies_only_its_halfs_cells() {
+    let r = Repo::init();
+    r.write("w.rs", &format!("{}\nkeep\n", "x".repeat(120)));
+    r.commit_all("init");
+    r.write("w.rs", "short\nkeep\n");
+    let mut app = split_pane(&r);
+    app.wrap = false;
+    let row = row_of(&app, (Some(1), Some(1)));
+    let start = split_cell(&app, Side::Old, row, 0);
+    let (divider, y) = split_cell(&app, Side::New, row, -6);
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), start);
+    split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), (divider - 1, y));
+    let edge = herdr_reviewr::drag_text(&app, SPLIT_AREA).unwrap();
+    assert!(edge.len() < 120, "the old half shows only part of the line");
+    split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), (divider + 10, y));
+    // Past the edge the half scrolls; the extent stops at its last painted cell all the same.
+    let painted = "x".repeat(edge.len() + app.h_scroll);
+    assert_eq!(herdr_reviewr::drag_text(&app, SPLIT_AREA), Some(painted), "no hidden cell copies");
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), (divider + 10, y));
+}
+
+#[test]
+fn a_wide_glyph_across_a_halfs_edge_is_never_copied() {
+    let r = Repo::init();
+    let wide = format!("{}日y", "x".repeat(72));
+    r.write("w.rs", &format!("{}\n{wide}\nkeep\n", "x".repeat(120)));
+    r.commit_all("init");
+    r.write("w.rs", "a\nb\nkeep\n");
+    let mut app = split_pane(&r);
+    app.wrap = false;
+    let drag_to_edge = |app: &mut App, row: usize| {
+        let (divider, y) = split_cell(app, Side::New, row, -6);
+        split_mouse(
+            app,
+            MouseEventKind::Down(MouseButton::Left),
+            split_cell(app, Side::Old, row, 0),
+        );
+        split_mouse(app, MouseEventKind::Drag(MouseButton::Left), (divider - 1, y));
+        let text = herdr_reviewr::drag_text(app, SPLIT_AREA).unwrap();
+        split_mouse(app, MouseEventKind::Up(MouseButton::Left), (divider - 1, y));
+        text
+    };
+    assert_eq!(drag_to_edge(&mut app, 0).len(), 73, "the old half shows 73 code columns");
+    assert_eq!(drag_to_edge(&mut app, 1), "x".repeat(72), "`日` would cross the divider");
+}
+
+#[test]
+fn a_blank_halfs_gutter_is_inert() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let two = row_of(&app, (Some(3), None));
+    let blank = split_cell(&app, Side::New, two, -3);
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), blank);
+    assert!(!app.gutter_drag(), "no line sits beside the blank half facing `old two`");
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), blank);
+
+    let held = split_cell(&app, Side::Old, two, -3);
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), held);
+    assert!(app.gutter_drag(), "the old half's gutter holds `old two`");
+}
+
+#[test]
+fn a_split_text_drag_scrolls_sideways_at_its_own_halfs_edges() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    app.wrap = false;
+    let one = row_of(&app, (Some(2), Some(2)));
+    let (old, new) = (split_cell(&app, Side::Old, one, 0), split_cell(&app, Side::New, one, 0));
+    let divider = split_cell(&app, Side::New, one, -6);
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), old);
+    split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), divider);
+    assert_eq!(app.h_scroll, 2, "the old half's right edge scrolls right");
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), divider);
+
+    app.h_scroll = 4;
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), new);
+    split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), divider);
+    assert_eq!(app.h_scroll, 2, "the new half's left edge scrolls left");
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), divider);
 }

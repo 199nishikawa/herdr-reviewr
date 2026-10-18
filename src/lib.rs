@@ -1658,7 +1658,7 @@ fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bo
 /// Map one key press onto `App` through the painted frame's `keymap`.
 pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Result<()> {
     let done = dispatch_key(app, key, area, keymap);
-    app.settle_pick();
+    app.settle_input();
     done
 }
 
@@ -2102,9 +2102,15 @@ fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) 
     }
     // Rendered markdown never scrolls sideways, so its drag leaves the source's offset alone.
     if horizontal && !app.wrap && !app.rendered_active() {
-        if m.column < content.x {
+        // A split drag scrolls at its own half's edges.
+        let side = match app.text_drag().map(|d| d.surface) {
+            Some(crate::selection::Surface::Read { side }) => side,
+            _ => None,
+        };
+        let (left, right) = ui::read_drag_columns(area, app, side);
+        if m.column < left {
             app.h_scroll = app.h_scroll.saturating_sub(2);
-        } else if m.column >= content.x + content.width {
+        } else if m.column >= right {
             // Capped at the widest row, never pulled back from a keyboard scroll past it.
             let cap = ui::widest_visible_row(app, area).saturating_sub(1);
             if app.h_scroll < cap {
@@ -2345,7 +2351,7 @@ pub fn handle_mouse(
     target: &dyn crate::export::ExportTarget,
 ) -> Result<()> {
     let done = dispatch_mouse(app, m, area, heights, keymap, target);
-    app.settle_pick();
+    app.settle_input();
     done
 }
 
