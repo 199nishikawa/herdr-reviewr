@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Toggle from a plugin's pane**: opening from a pane inside another plugin's checkout, like herdr-file-viewer, now reviews the agent's repo, else another pane's, not that checkout.
+  Thanks [@Branpolo](https://github.com/Branpolo) ([#130](https://github.com/persiyanov/herdr-reviewr/issues/130)).
+
 ## [0.46.1] — 2026-10-18
 
 ### Fixed
