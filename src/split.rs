@@ -10,8 +10,12 @@ use crate::model::Side;
 pub enum Pair {
     /// An unchanged line: one context row, painted on both halves.
     Same(Row),
-    /// A deletion facing an insertion; a blank half is `None`.
-    Changed { old: Option<Row>, new: Option<Row> },
+    /// A deletion facing a blank new half.
+    Old(Row),
+    /// An insertion facing a blank old half.
+    New(Row),
+    /// A deletion facing an insertion.
+    Both { old: Row, new: Row },
 }
 
 impl Pair {
@@ -19,10 +23,18 @@ impl Pair {
     #[must_use]
     pub fn half(&self, side: Side) -> Option<&Row> {
         match (self, side) {
-            (Pair::Same(row), _) => Some(row),
-            (Pair::Changed { old, .. }, Side::Old) => old.as_ref(),
-            (Pair::Changed { new, .. }, Side::New) => new.as_ref(),
+            (Pair::Same(row) | Pair::Old(row) | Pair::Both { old: row, .. }, Side::Old)
+            | (Pair::Same(row) | Pair::New(row) | Pair::Both { new: row, .. }, Side::New) => {
+                Some(row)
+            }
+            (Pair::New(_), Side::Old) | (Pair::Old(_), Side::New) => None,
         }
+    }
+
+    /// Both halves, old then new.
+    #[must_use]
+    pub fn halves(&self) -> [Option<&Row>; 2] {
+        [self.half(Side::Old), self.half(Side::New)]
     }
 }
 
@@ -100,9 +112,9 @@ impl Visible {
 
 /// A diff's rows as split rows: each change block's anchors face each other, the rest by position.
 #[must_use]
-pub fn split_rows(rows: Vec<Row>, similar: &[(u32, u32)]) -> Vec<Visible> {
+pub fn split_rows(rows: Vec<Row>, pairs: &[(u32, u32)]) -> Vec<Visible> {
     // Each old line pairs at most once, so one lookup per deletion.
-    let similar: HashMap<u32, u32> = similar.iter().copied().collect();
+    let pairs: HashMap<u32, u32> = pairs.iter().copied().collect();
     let blocks = change_blocks(&rows);
     let mut out = Vec::with_capacity(rows.len());
     let mut rows = rows.into_iter();
@@ -111,7 +123,7 @@ pub fn split_rows(rows: Vec<Row>, similar: &[(u32, u32)]) -> Vec<Visible> {
         out.extend(rows.by_ref().take(dels.start - i).map(unchanged));
         let old: Vec<Row> = rows.by_ref().take(dels.len()).collect();
         let new: Vec<Row> = rows.by_ref().take(inss.len()).collect();
-        face(old, new, &similar, &mut out);
+        face(old, new, &pairs, &mut out);
         i = inss.end;
     }
     out.extend(rows.map(unchanged));
@@ -127,43 +139,48 @@ fn unchanged(row: Row) -> Visible {
 }
 
 /// Push one block's pairs: anchors facing, the gaps between them filled by position.
-fn face(dels: Vec<Row>, inss: Vec<Row>, similar: &HashMap<u32, u32>, out: &mut Vec<Visible>) {
-    let anchors = anchors(&dels, &inss, similar);
-    let (nd, ni) = (dels.len(), inss.len());
-    let mut dels: Vec<Option<Row>> = dels.into_iter().map(Some).collect();
-    let mut inss: Vec<Option<Row>> = inss.into_iter().map(Some).collect();
+fn face(dels: Vec<Row>, inss: Vec<Row>, pairs: &HashMap<u32, u32>, out: &mut Vec<Visible>) {
+    let anchors = anchors(&dels, &inss, pairs);
+    let ends = (dels.len(), inss.len());
+    let (mut dels, mut inss) = (dels.into_iter(), inss.into_iter());
     let (mut k, mut j) = (0, 0);
-    for (ak, aj) in anchors.into_iter().chain([(nd, ni)]) {
-        for g in 0..(ak - k).max(aj - j) {
-            let old = if k + g < ak { dels[k + g].take() } else { None };
-            let new = if j + g < aj { inss[j + g].take() } else { None };
-            out.push(pair(old, new, similar));
+    for (ak, aj) in anchors.into_iter().chain([ends]) {
+        let (mut olds, mut news) = (dels.by_ref().take(ak - k), inss.by_ref().take(aj - j));
+        loop {
+            let pair = match (olds.next(), news.next()) {
+                (None, None) => break,
+                (Some(old), Some(new)) => both(old, new, pairs),
+                (Some(old), None) => Pair::Old(plain(old)),
+                (None, Some(new)) => Pair::New(plain(new)),
+            };
+            out.push(Visible::Pair(pair));
         }
-        if ak < nd {
-            out.push(pair(dels[ak].take(), inss[aj].take(), similar));
+        if let (Some(old), Some(new)) = (dels.next(), inss.next()) {
+            out.push(Visible::Pair(both(old, new, pairs)));
         }
         (k, j) = (ak + 1, aj + 1);
     }
 }
 
-/// A changed pair; emphasis paints only on a similar pair that faces.
-fn pair(old: Option<Row>, new: Option<Row>, similar: &HashMap<u32, u32>) -> Visible {
-    let faced = match (old.as_ref().and_then(Row::old_no), new.as_ref().and_then(Row::new_no)) {
-        (Some(o), Some(n)) => similar.get(&o) == Some(&n),
-        _ => false,
-    };
-    let plain = |mut row: Row| {
-        if let Row::Deletion { emphasis, .. } | Row::Insertion { emphasis, .. } = &mut row {
-            emphasis.clear();
-        }
-        row
-    };
-    let (old, new) = if faced { (old, new) } else { (old.map(plain), new.map(plain)) };
-    Visible::Pair(Pair::Changed { old, new })
+/// A deletion facing an insertion; emphasis paints only when the two are a homolog pair.
+fn both(old: Row, new: Row, pairs: &HashMap<u32, u32>) -> Pair {
+    if old.old_no().is_some_and(|o| pairs.get(&o) == new.new_no().as_ref()) {
+        Pair::Both { old, new }
+    } else {
+        Pair::Both { old: plain(old), new: plain(new) }
+    }
+}
+
+/// `row` without word emphasis, which only a facing homolog keeps.
+fn plain(mut row: Row) -> Row {
+    if let Row::Deletion { emphasis, .. } | Row::Insertion { emphasis, .. } = &mut row {
+        emphasis.clear();
+    }
+    row
 }
 
 /// A block's `(deletion, insertion)` anchors: similar pairs and unique twins, the longest uncrossed.
-fn anchors(dels: &[Row], inss: &[Row], similar: &HashMap<u32, u32>) -> Vec<(usize, usize)> {
+fn anchors(dels: &[Row], inss: &[Row], pairs: &HashMap<u32, u32>) -> Vec<(usize, usize)> {
     let (old, new): (Vec<String>, Vec<String>) =
         (dels.iter().map(Row::text).collect(), inss.iter().map(Row::text).collect());
     let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
@@ -182,7 +199,10 @@ fn anchors(dels: &[Row], inss: &[Row], similar: &HashMap<u32, u32>) -> Vec<(usiz
         if counts[old[k].as_str()] == (1, 1) {
             found.push((k, new_at[old[k].as_str()]));
         }
-        if let Some(&j) = d.old_no().and_then(|o| similar.get(&o)).and_then(|n| ins_at.get(n)) {
+        // A homolog whose text differs is a similar pair: the twin pass takes every equal text first.
+        if let Some(&j) = d.old_no().and_then(|o| pairs.get(&o)).and_then(|n| ins_at.get(n))
+            && old[k] != new[j]
+        {
             found.push((k, j));
         }
     }
@@ -221,6 +241,8 @@ mod tests {
     use super::{Pair, Visible, split_rows};
     use crate::diff::{FileDiff, Row};
     use crate::highlight::Highlighter;
+    use crate::marks::diff_lines;
+    use crate::model::Side;
     use crate::theme;
     use std::fmt::Write as _;
 
@@ -233,8 +255,9 @@ mod tests {
     fn changed(rows: &[Visible]) -> Vec<(Option<String>, Option<String>)> {
         rows.iter()
             .filter_map(|v| match v {
-                Visible::Pair(Pair::Changed { old, new }) => {
-                    Some((old.as_ref().map(Row::text), new.as_ref().map(Row::text)))
+                Visible::Pair(p) if !matches!(p, Pair::Same(_)) => {
+                    let [old, new] = p.halves();
+                    Some((old.map(Row::text), new.map(Row::text)))
                 }
                 _ => None,
             })
@@ -243,20 +266,16 @@ mod tests {
 
     /// Whether either half of a split row carries word emphasis.
     fn emphasized(v: &Visible) -> bool {
-        let Visible::Pair(Pair::Changed { old, new }) = v else { return false };
-        old.iter().chain(new).any(|r| !r.emphasis().is_empty())
+        let Visible::Pair(p) = v else { return false };
+        p.halves().into_iter().flatten().any(|r| !r.emphasis().is_empty())
     }
 
     /// Every line of `diff` appears in exactly one split row, on its own side, in order.
     fn assert_each_line_once(diff: &FileDiff, rows: &[Visible]) {
         let mut want: (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
-        for row in &diff.rows {
-            for line in
-                if let Row::Fold { lines } = row { lines.clone() } else { vec![row.clone()] }
-            {
-                want.0.extend(line.old_no());
-                want.1.extend(line.new_no());
-            }
+        for line in diff_lines(&diff.rows) {
+            want.0.extend(line.old_no());
+            want.1.extend(line.new_no());
         }
         let mut got: (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
         for v in rows {
@@ -278,7 +297,7 @@ mod tests {
     #[test]
     fn a_rewrite_faces_its_lines_by_position() {
         let d = build("keep\nalpha one\nbeta two\ngamma three\n", "keep\nzzz\nyyy\n");
-        let rows = split_rows(d.rows.clone(), &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.pairs);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
@@ -294,7 +313,7 @@ mod tests {
     #[test]
     fn a_similar_pair_faces_its_partner_past_an_inserted_line() {
         let d = build("let total = sum + 1;\n", "let fresh = 0;\nlet total = sum + 2;\n");
-        let rows = split_rows(d.rows.clone(), &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.pairs);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
@@ -310,7 +329,7 @@ mod tests {
     fn a_unique_twin_anchors_past_an_inserted_line() {
         // The endings differ, so the twins stay in the block; position alone would stagger them.
         let d = build("a\r\nb\r\n", "x\na\nb\n");
-        let rows = split_rows(d.rows.clone(), &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.pairs);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
@@ -329,7 +348,7 @@ mod tests {
         let new =
             "let total1 = sum + 2;\nlet total2 = sum + 2;\nlet total3 = sum + 2;\nunique_line();\n";
         let d = build(old, new);
-        let rows = split_rows(d.rows.clone(), &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.pairs);
         assert_each_line_once(&d, &rows);
         let pair = |i: usize| {
             (Some(format!("let total{i} = sum + 1;")), Some(format!("let total{i} = sum + 2;")))
@@ -354,13 +373,13 @@ mod tests {
             "unique_line();\nlet total = sum + 2;\n",
         );
         assert_eq!(d.pairs.len(), 2, "pair_homologs crosses them: {:?}", d.pairs);
-        let rows = split_rows(d.rows.clone(), &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.pairs);
         assert_each_line_once(&d, &rows);
         for v in &rows {
-            let Visible::Pair(Pair::Changed { old, new }) = v else { continue };
-            let faces_partner = old.as_ref().map(Row::text).as_deref()
-                == Some("let total = sum + 1;")
-                && new.as_ref().map(Row::text).as_deref() == Some("let total = sum + 2;");
+            let Visible::Pair(p) = v else { continue };
+            let [old, new] = p.halves().map(|r| r.map(Row::text));
+            let faces_partner = old.as_deref() == Some("let total = sum + 1;")
+                && new.as_deref() == Some("let total = sum + 2;");
             assert_eq!(emphasized(v), faces_partner, "emphasis only where the pair faces: {v:?}");
         }
     }
@@ -368,13 +387,13 @@ mod tests {
     #[test]
     fn a_line_ending_change_faces_its_twin_with_the_cr_marker() {
         let d = build("a\r\nb\r\n", "a\nb\n");
-        let rows = split_rows(d.rows.clone(), &d.similar);
+        let rows = split_rows(d.rows.clone(), &d.pairs);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
             [(Some("a".into()), Some("a".into())), (Some("b".into()), Some("b".into()))]
         );
-        let Visible::Pair(Pair::Changed { old: Some(old), .. }) = &rows[0] else { panic!() };
+        let Visible::Pair(Pair::Both { old, .. }) = &rows[0] else { panic!() };
         assert!(old.cr_marker(), "the old half keeps its CR marker");
     }
 
@@ -395,8 +414,10 @@ mod tests {
             }
         }
         let d = build(&old, &new);
-        assert!(d.pairs.len() > d.similar.len() + 100, "the block holds many twins");
-        let rows = split_rows(d.rows.clone(), &d.similar);
+        let text = |side, n| diff_lines(&d.rows).find(|r| r.no(side) == Some(n)).map(Row::text);
+        let twins = d.pairs.iter().filter(|&&(o, n)| text(Side::Old, o) == text(Side::New, n));
+        assert!(twins.count() > 100, "the block holds many twins");
+        let rows = split_rows(d.rows.clone(), &d.pairs);
         assert_each_line_once(&d, &rows);
         // Non-unique twins never anchor, so no run of one-sided rows staggers the block.
         let mut one_sided = 0;

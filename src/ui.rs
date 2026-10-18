@@ -602,15 +602,18 @@ pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize>
         return None;
     }
     let slots = app.painted_slots();
-    let Slot::Code { row: li, .. } = *slots.get((row - pane.inner.y) as usize)? else {
+    let Slot::Code { row: li, seg } = *slots.get((row - pane.inner.y) as usize)? else {
         return None;
     };
     let in_gutter = |x0: usize| (x0..x0 + pane.prefix_w).contains(&(col as usize));
-    // A blank half paints no gutter, so it takes no gutter gesture.
+    let gutter_w = gutter_for(&app.diff);
+    // A half's gutter is painted only on its own lines, never on a blank half or its padding.
     let hit = match &app.visible[li] {
-        Visible::Pair(p) => [Side::Old, Side::New]
-            .into_iter()
-            .any(|side| p.half(side).is_some() && in_gutter(half_column(&pane, side).0)),
+        Visible::Pair(p) => [Side::Old, Side::New].into_iter().any(|side| {
+            let (x0, width) = column(&pane, Some(side));
+            let lines = |r: &Row| row_height(r, gutter_w, width, app.wrap);
+            p.half(side).is_some_and(|r| seg < lines(r)) && in_gutter(x0)
+        }),
         Visible::Row(row) => row.is_content() && in_gutter(pane.inner.x as usize),
     };
     hit.then_some(li)
@@ -1934,9 +1937,9 @@ fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
     wrap_segments(&plain_cells(row), code_width, ContinuationSpaces::Trim).len()
 }
 
-/// The narrowest read pane that shows split: 60 code columns a side beside a five-digit gutter
-/// (files cap at 50,000 lines), and the divider.
-pub const SPLIT_MIN_WIDTH: usize = 2 * (gutter_prefix_width(5) + 60) + 1;
+/// The narrowest read pane that shows split: two 60-column halves, the longest file's gutters.
+pub const SPLIT_MIN_WIDTH: usize =
+    2 * (gutter_prefix_width(crate::diff::MAX_LINES.ilog10() as usize + 1) + 60) + 1;
 
 /// A split row's halves' widths: the divider's column between them.
 fn half_widths(width: usize) -> (usize, usize) {
@@ -1944,23 +1947,20 @@ fn half_widths(width: usize) -> (usize, usize) {
     (left, width.saturating_sub(1 + left))
 }
 
-/// A pair's halves as rows, old then new; a blank half is `None`.
-fn pair_rows(p: &Pair) -> [Option<&Row>; 2] {
-    [p.half(Side::Old), p.half(Side::New)]
-}
-
-/// A split row's half on `side`: its left edge and width in the read pane.
-fn half_column(pane: &ReadPane, side: Side) -> (usize, usize) {
-    let (lw, rw) = half_widths(pane.inner.width as usize);
+/// The read pane's text column on `side`: a split half's left edge and width, else the pane's.
+fn column(pane: &ReadPane, side: Option<Side>) -> (usize, usize) {
+    let (x, width) = (pane.inner.x as usize, pane.inner.width as usize);
+    let (lw, rw) = half_widths(width);
     match side {
-        Side::Old => (pane.inner.x as usize, lw),
-        Side::New => (pane.inner.x as usize + lw + 1, rw),
+        Some(Side::Old) => (x, lw),
+        Some(Side::New) => (x + lw + 1, rw),
+        None => (x, width),
     }
 }
 
 /// The half of a split row under display column `col`; the divider is neither.
 fn side_at(pane: &ReadPane, col: u16) -> Option<Side> {
-    let divider = half_column(pane, Side::Old).1 + pane.inner.x as usize;
+    let divider = column(pane, Some(Side::Old)).1 + pane.inner.x as usize;
     match (col as usize).cmp(&divider) {
         std::cmp::Ordering::Less => Some(Side::Old),
         std::cmp::Ordering::Greater => Some(Side::New),
@@ -1977,21 +1977,14 @@ fn text_column<'a>(
 ) -> Option<(usize, usize, &'a Row)> {
     let v = app.visible.get(li)?;
     let row = v.text_row(side)?;
-    let (x0, width) = match (v, side) {
-        (Visible::Pair(_), Some(side)) => half_column(pane, side),
-        _ => (pane.inner.x as usize, pane.inner.width as usize),
-    };
+    let (x0, width) = column(pane, side.filter(|_| matches!(v, Visible::Pair(_))));
     Some((x0, width, row))
 }
 
 /// The columns a text drag on `side` scrolls sideways past: its split half, else the read pane.
 #[must_use]
 pub fn read_drag_columns(area: Rect, app: &App, side: Option<Side>) -> (u16, u16) {
-    let pane = read_pane(area, app);
-    let (x0, width) = match side.filter(|_| app.split_on_screen()) {
-        Some(side) => half_column(&pane, side),
-        None => (pane.inner.x as usize, pane.inner.width as usize),
-    };
+    let (x0, width) = column(&read_pane(area, app), side);
     (x0 as u16, (x0 + width) as u16)
 }
 
@@ -2001,10 +1994,10 @@ fn visible_height(v: &Visible, gutter_w: usize, width: usize, wrap: bool) -> usi
         Visible::Row(row) => row_height(row, gutter_w, width, wrap),
         Visible::Pair(p) => {
             let (l, r) = half_widths(width);
-            let [old, new] = pair_rows(p);
+            let [old, new] = p.halves();
             let height =
                 |row: Option<&Row>, w: usize| row.map_or(0, |r| row_height(r, gutter_w, w, wrap));
-            height(old, l).max(height(new, r)).max(1)
+            height(old, l).max(height(new, r))
         }
     }
 }
@@ -2013,8 +2006,8 @@ fn visible_height(v: &Visible, gutter_w: usize, width: usize, wrap: bool) -> usi
 fn visible_code_width(v: &Visible) -> usize {
     let cells = |row: &Row| -> usize { plain_cells(row).iter().map(|c| c.w).sum() };
     match v {
-        Visible::Row(row) => cells(row),
-        Visible::Pair(p) => pair_rows(p).into_iter().flatten().map(cells).max().unwrap_or(0),
+        Visible::Row(row) | Visible::Pair(Pair::Same(row)) => cells(row),
+        Visible::Pair(p) => p.halves().into_iter().flatten().map(cells).max().unwrap_or(0),
     }
 }
 
@@ -2025,24 +2018,28 @@ fn render_visible(v: &Visible, layout: RowLayout<'_>, state: RowState) -> Vec<Li
         Visible::Pair(p) => p,
     };
     let (lw, rw) = half_widths(layout.width);
-    let half = |row: Option<&Row>, width: usize, numbered: Side| {
-        row.map(|r| render_row(r, RowLayout { width, numbered, ..layout }, state))
-    };
-    let [old, new] = pair_rows(p);
-    let (left, right) = (half(old, lw, Side::Old), half(new, rw, Side::New));
-    let rows = left.as_ref().map_or(0, Vec::len).max(right.as_ref().map_or(0, Vec::len)).max(1);
     // A blank half is the terminal's, unless the cursor or selection paints across it.
     let on = row_fill(state.cursor, state.selected, layout.focused, Fill::Base);
     let blank = |width: usize| fill(Line::from(" ".repeat(width)), layout.pal.bg(on));
-    let divider = Span::styled("│", Style::default().fg(layout.pal.mark(Ink::Border, on)));
-    let line_at = |lines: &Option<Vec<Line<'static>>>, k: usize, width: usize| {
-        lines.as_ref().and_then(|l| l.get(k).cloned()).unwrap_or_else(|| blank(width))
+    // A half narrower than its gutter and one cell paints blank, so the divider holds its column.
+    let half = |row: Option<&Row>, width: usize, numbered: Side| {
+        let lines = row.map_or_else(Vec::new, |r| {
+            render_row(r, RowLayout { width, numbered, ..layout }, state)
+        });
+        let fit = |l: Line<'static>| if l.width() > width { blank(width) } else { l };
+        lines.into_iter().map(fit).collect::<Vec<_>>()
     };
+    let [old, new] = p.halves();
+    let (left, right) = (half(old, lw, Side::Old), half(new, rw, Side::New));
+    let rows = left.len().max(right.len());
+    let divider = Style::default().fg(layout.pal.mark(Ink::Border, on));
+    let divider = Span::styled("│", layout.pal.bg(on).map_or(divider, |bg| divider.bg(bg)));
+    let (mut left, mut right) = (left.into_iter(), right.into_iter());
     (0..rows)
-        .map(|k| {
-            let mut spans = line_spans(line_at(&left, k, lw));
+        .map(|_| {
+            let mut spans = line_spans(left.next().unwrap_or_else(|| blank(lw)));
             spans.push(divider.clone());
-            spans.extend(line_spans(line_at(&right, k, rw)));
+            spans.extend(line_spans(right.next().unwrap_or_else(|| blank(rw))));
             Line::from(spans)
         })
         .collect()
@@ -2185,10 +2182,9 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         return vec![line.style(Style::default().bg(pal.fill(on)).add_modifier(Modifier::BOLD))];
     }
     // `0` is an unnumbered PR snippet row; file diffs are 1-based.
-    let other = if numbered == Side::New { Side::Old } else { Side::New };
     let num = row
         .no(numbered)
-        .or_else(|| row.no(other))
+        .or_else(|| row.no(numbered.other()))
         .filter(|&n| n > 0)
         .map_or(String::new(), |n| n.to_string());
     let (bar, bar_ink, tint) = match row.marker() {

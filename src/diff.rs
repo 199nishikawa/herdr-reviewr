@@ -211,8 +211,6 @@ pub struct FileDiff {
     pub rows: Vec<Row>,
     /// The `(old, new)` line numbers of each line edited in place.
     pub pairs: Vec<(u32, u32)>,
-    /// The subset of `pairs` matched as similar lines, not as exact twins.
-    pub similar: Vec<(u32, u32)>,
 }
 
 /// The line budget; the byte budget below catches one huge line.
@@ -233,6 +231,21 @@ impl Default for FileDiff {
 }
 
 impl FileDiff {
+    /// Whether a split view has two sides to show: a changed line, and lines on both sides.
+    #[must_use]
+    pub fn splits(&self) -> bool {
+        let (mut old, mut new, mut change) = (false, false, false);
+        for row in crate::marks::diff_lines(&self.rows) {
+            old |= row.old_no().is_some();
+            new |= row.new_no().is_some();
+            change |= matches!(row, Row::Deletion { .. } | Row::Insertion { .. });
+            if old && new && change {
+                return true;
+            }
+        }
+        false
+    }
+
     /// An empty placeholder, for when no file is selected.
     pub fn empty() -> Self {
         Self::rowless(String::new(), None, None, View::Diff)
@@ -245,15 +258,7 @@ impl FileDiff {
         notice: Option<Notice>,
         view: View,
     ) -> Self {
-        Self {
-            path,
-            previous_path,
-            notice,
-            view,
-            rows: Vec::new(),
-            pairs: Vec::new(),
-            similar: Vec::new(),
-        }
+        Self { path, previous_path, notice, view, rows: Vec::new(), pairs: Vec::new() }
     }
 
     /// Build the diff of `old` to `new`; `previous_path` is a rename or copy source.
@@ -316,14 +321,10 @@ impl FileDiff {
         }
         // Pair on text alone, then mark endings, so an ending-only change pairs with its twin.
         let paired = compute_emphasis(&mut rows);
-        mark_crs(&mut rows, &old_lines, &new_lines, &paired.all);
-        let numbers = |pairs: &[(usize, usize)]| {
-            let mut out: Vec<(u32, u32)> =
-                pairs.iter().filter_map(|&(d, i)| rows[d].old_no().zip(rows[i].new_no())).collect();
-            out.sort_unstable();
-            out
-        };
-        let (pairs, similar) = (numbers(&paired.all), numbers(&paired.similar));
+        mark_crs(&mut rows, &old_lines, &new_lines, &paired);
+        let mut pairs: Vec<(u32, u32)> =
+            paired.iter().filter_map(|&(d, i)| rows[d].old_no().zip(rows[i].new_no())).collect();
+        pairs.sort_unstable();
         Self {
             path,
             previous_path,
@@ -331,7 +332,6 @@ impl FileDiff {
             view: View::Diff,
             rows: collapse_context(&rows),
             pairs,
-            similar,
         }
     }
 
@@ -394,16 +394,9 @@ fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(usize, usize
     }
 }
 
-/// The homolog pairs' row indices: all of them, and the similar ones among them.
-#[derive(Default)]
-pub(crate) struct Homologs {
-    pub all: Vec<(usize, usize)>,
-    pub similar: Vec<(usize, usize)>,
-}
-
-/// Word emphasis on each change block's homolog pairs; returns the pairs.
-pub(crate) fn compute_emphasis(rows: &mut [Row]) -> Homologs {
-    let mut pairs = Homologs::default();
+/// Word emphasis on each change block's homolog pairs; returns the pairs' row indices.
+pub(crate) fn compute_emphasis(rows: &mut [Row]) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
     for (dels, inss) in change_blocks(rows) {
         pair_homologs(rows, dels, inss, &mut pairs);
     }
@@ -445,7 +438,7 @@ fn pair_homologs(
     rows: &mut [Row],
     dels: std::ops::Range<usize>,
     inss: std::ops::Range<usize>,
-    pairs: &mut Homologs,
+    pairs: &mut Vec<(usize, usize)>,
 ) {
     let old_texts: Vec<String> = dels.clone().map(|d| rows[d].text()).collect();
     let new_texts: Vec<String> = inss.clone().map(|p| rows[p].text()).collect();
@@ -460,7 +453,7 @@ fn pair_homologs(
         if let Some(j) = twins.get_mut(old_texts[k].as_str()).and_then(VecDeque::pop_front) {
             claimed[j] = true;
             twinned[k] = true;
-            pairs.all.push((d, inss.start + j));
+            pairs.push((d, inss.start + j));
         }
     }
     // Then each remaining line's first similar unclaimed successor within a window, in order.
@@ -480,8 +473,7 @@ fn pair_homologs(
                     *emphasis = new_e;
                 }
                 claimed[p - inss.start] = true;
-                pairs.all.push((d, p));
-                pairs.similar.push((d, p));
+                pairs.push((d, p));
                 next_ins = p + 1;
                 break;
             }

@@ -64,7 +64,7 @@ use crate::app::{App, Focus, Mode};
 use crate::config::{Config, PluginConfig};
 use crate::export::Clipboard;
 use crate::keymap::Keymap;
-use crate::model::Scope;
+use crate::model::{Scope, Side};
 
 /// Entry point: parse config, set up the terminal, run the loop, restore.
 pub fn run() -> Result<()> {
@@ -2032,9 +2032,12 @@ fn text_drag_edge_scroll(app: &mut App, m: MouseEvent, area: Rect) {
     use crate::selection::Surface;
     let Some(drag) = app.text_drag() else { return };
     match drag.surface {
-        Surface::Read { .. } => read_edge_scroll(app, m, area, true),
+        Surface::Read { side } => {
+            read_edge_scroll(app, m, area);
+            read_edge_scroll_sideways(app, m, area, side);
+        }
         // Card text ignores h-scroll (TS-ONE-SURFACE).
-        Surface::Card { .. } => read_edge_scroll(app, m, area, false),
+        Surface::Card { .. } => read_edge_scroll(app, m, area),
         Surface::Files => {
             let inner = ui::files_inner_rect(area, app);
             let delta = edge_delta(m.row, inner);
@@ -2088,8 +2091,8 @@ fn text_drag_set_extent(app: &mut App, m: MouseEvent, area: Rect) {
     }
 }
 
-/// Scroll the read pane while a drag is past its content, and sideways when `horizontal`.
-fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) {
+/// Scroll the read pane while a drag is past its content rows.
+fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect) {
     let content = ui::read_content_rect(area, app);
     if content.height == 0 {
         return;
@@ -2100,22 +2103,22 @@ fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) 
         // The same event's extent update maps against the post-scroll layout.
         ui::refresh_read_layout(app, area);
     }
+}
+
+/// Scroll the read pane sideways while a text drag is past its column on `side`.
+fn read_edge_scroll_sideways(app: &mut App, m: MouseEvent, area: Rect, side: Option<Side>) {
     // Rendered markdown never scrolls sideways, so its drag leaves the source's offset alone.
-    if horizontal && !app.wrap && !app.rendered_active() {
-        // A split drag scrolls at its own half's edges.
-        let side = match app.text_drag().map(|d| d.surface) {
-            Some(crate::selection::Surface::Read { side }) => side,
-            _ => None,
-        };
-        let (left, right) = ui::read_drag_columns(area, app, side);
-        if m.column < left {
-            app.h_scroll = app.h_scroll.saturating_sub(2);
-        } else if m.column >= right {
-            // Capped at the widest row, never pulled back from a keyboard scroll past it.
-            let cap = ui::widest_visible_row(app, area).saturating_sub(1);
-            if app.h_scroll < cap {
-                app.h_scroll = (app.h_scroll + 2).min(cap);
-            }
+    if app.wrap || app.rendered_active() {
+        return;
+    }
+    let (left, right) = ui::read_drag_columns(area, app, side);
+    if m.column < left {
+        app.h_scroll = app.h_scroll.saturating_sub(2);
+    } else if m.column >= right {
+        // Capped at the widest row, never pulled back from a keyboard scroll past it.
+        let cap = ui::widest_visible_row(app, area).saturating_sub(1);
+        if app.h_scroll < cap {
+            app.h_scroll = (app.h_scroll + 2).min(cap);
         }
     }
 }
@@ -2588,7 +2591,7 @@ fn dispatch_mouse(
         }
         MouseEventKind::Drag(MouseButton::Left) if app.gutter_drag() => {
             // A gutter drag selects rows, so it never scrolls horizontally.
-            read_edge_scroll(app, m, area, false);
+            read_edge_scroll(app, m, area);
             if let Some(p) = ui::read_point_clamped(area, app, None, m.column, m.row) {
                 app.drag_select_to(p.row);
             }

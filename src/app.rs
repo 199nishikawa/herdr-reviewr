@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::config::DiffView;
 use crate::diff::{DiffCache, FileDiff, RenderedKind, Row, View};
 use crate::export::{Agent, ExportTarget, format_all};
 use crate::file_list::{self, Entry, RowKind};
@@ -99,6 +100,7 @@ struct TabStash {
     h_scroll: usize,
     select_anchor: Option<usize>,
     switch_line: Option<(usize, Side, u32)>,
+    cursor_line: Option<(usize, usize)>,
     comment_target: Option<u64>,
     rendered: RenderedView,
     /// Whether this tab ever loaded; a first visit loads before the frame.
@@ -630,6 +632,8 @@ pub struct App {
     pub reveal_diff: bool,
     /// Set by `goto_line`: center a cursor that landed off screen, not nudge it to the edge.
     pub reveal_center: bool,
+    /// Set by a relayout: the screen lines above the cursor the next frame keeps.
+    keep_above: Option<usize>,
     /// The file crossing a hunk step armed at the file's last hunk.
     armed_cross: Option<ArmedCross>,
     /// Whether this compose opened from the comments list, to return there.
@@ -661,7 +665,7 @@ pub struct App {
     /// The rendered rows' wrap width, `0` until the first frame.
     rendered_width: usize,
     /// The pane-wide diff choice, `None` until the config seeds it or `|` flips it.
-    split_chosen: Option<bool>,
+    split_chosen: Option<DiffView>,
     /// The read pane's inner width, which decides whether split fits; `0` until the first frame.
     split_width: usize,
     /// The line a view switch landed the cursor on, at that row, so switching back returns to it.
@@ -670,6 +674,8 @@ pub struct App {
     painted_links: std::cell::RefCell<Vec<PaintedLink>>,
     /// The read pane's display lines as painted, which every hit test indexes.
     painted_slots: std::cell::RefCell<Vec<crate::ui::Slot>>,
+    /// The cursor's row and the screen line it started on when this tab last painted it.
+    cursor_line: std::cell::Cell<Option<(usize, usize)>>,
     /// The whole body's heading anchors as `(slug, line)`.
     painted_anchors: std::cell::RefCell<Vec<(String, usize)>>,
     /// `<details>` summary hit boxes painted this frame.
@@ -858,6 +864,7 @@ impl App {
             reveal_files: false,
             reveal_diff: false,
             reveal_center: false,
+            keep_above: None,
             armed_cross: None,
             resume_list: false,
             toggled_dirs: HashSet::new(),
@@ -879,6 +886,7 @@ impl App {
             switch_line: None,
             painted_links: std::cell::RefCell::new(Vec::new()),
             painted_slots: std::cell::RefCell::new(Vec::new()),
+            cursor_line: std::cell::Cell::new(None),
             painted_anchors: std::cell::RefCell::new(Vec::new()),
             painted_details: std::cell::RefCell::new(Vec::new()),
             pr_expanded_details: HashSet::new(),
@@ -1428,11 +1436,17 @@ impl App {
         self.drop_read_marks();
     }
 
-    /// Build `visible`: rendered rows, else source (an empty render shows source too).
-    /// The one rebuild site, so it carries the place, the find band, and the marks.
+    /// Rebuild `visible` in the layout on screen: a refresh or a fold never flips it (Continuity).
     fn rebuild_visible(&mut self) {
+        self.build_visible(false);
+    }
+
+    /// Build `visible`, rendered else source; `choose` (a view switch) picks split or unified anew.
+    /// The one rebuild site, so it carries the place, the find band, and the marks.
+    fn build_visible(&mut self, choose: bool) {
         let clicked_before = self.clicked_target_text();
         let was_rendered = self.rendered.on_screen();
+        let was_split = self.split_on_screen();
         // A line map, only when the text moved under the rendered rows.
         let text = self.rendered.text().unwrap_or_default();
         let edit = was_rendered
@@ -1443,9 +1457,17 @@ impl App {
         let spot_at = |i: usize| -> Spot {
             if was_rendered {
                 // A rendered row's current line: its unit's first line, through the edit.
-                let new = self.rendered.index.unit_at(i).map(|u| u.src);
-                let new = new.map(|src| edit.as_ref().map_or(src, |m| m.line(src)));
-                return Spot { new, at: new.map(|n| (Side::New, n)) };
+                let unit = self.rendered.index.unit_at(i);
+                let new = unit.map(|u| u.src).map(|src| edit.as_ref().map_or(src, |m| m.line(src)));
+                // The line a switch landed here from, while its block still holds it.
+                let holds = |side, n| {
+                    side == Side::Old || unit.is_some_and(|u| (u.src..=u.src_end).contains(&n))
+                };
+                let remembered = self
+                    .switch_line
+                    .filter(|&(row, side, n)| row == i && edit.is_none() && holds(side, n))
+                    .map(|(_, side, n)| (side, n));
+                return Spot { new, at: remembered.or(new.map(|n| (Side::New, n))) };
             }
             // The line a view switch landed on, while the cursor still sits on its row.
             let remembered = self
@@ -1470,24 +1492,23 @@ impl App {
             }
             // Source rows on screen: no render, marks, or index stand behind them.
             self.rendered.drop_rows();
-            let split = self.wants_split();
-            let rows: Vec<Row> = self
-                .diff
-                .rows
-                .iter()
-                .flat_map(|row| match row {
-                    Row::Fold { lines }
-                        if row.fold_anchor().is_some_and(|a| self.expanded_folds.contains(&a)) =>
-                    {
-                        lines.clone()
-                    }
-                    _ => vec![row.clone()],
-                })
-                .collect();
-            self.visible = if split {
-                crate::split::split_rows(rows, &self.diff.similar)
+            let split = if choose || place.is_none() {
+                self.wants_split()
             } else {
-                rows.into_iter().map(Visible::Row).collect()
+                was_split && self.diff.view == View::Diff
+            };
+            let rows = self.diff.rows.iter().flat_map(|row| match row {
+                Row::Fold { lines }
+                    if row.fold_anchor().is_some_and(|a| self.expanded_folds.contains(&a)) =>
+                {
+                    lines.clone()
+                }
+                _ => vec![row.clone()],
+            });
+            self.visible = if split {
+                crate::split::split_rows(rows.collect(), &self.diff.pairs)
+            } else {
+                rows.map(Visible::Row).collect()
             };
         }
         // Across layouts, the place crosses by line.
@@ -1943,6 +1964,7 @@ impl App {
         self.diff_scroll = 0;
         self.h_scroll = 0;
         self.select_anchor = None;
+        self.switch_line = None;
     }
 
     /// Scroll sideways by `delta` columns; inert while wrapping, so no offset piles up.
@@ -2000,7 +2022,7 @@ impl App {
     /// Seed a fresh pane's markdown and diff views; a reread never flips them.
     pub fn seed_from_config(&mut self, config: &crate::config::PluginConfig) {
         self.markdown_rendered = config.markdown_view() == crate::config::MarkdownView::Rendered;
-        self.split_chosen = Some(config.diff_view() == crate::config::DiffView::Split);
+        self.split_chosen = Some(config.diff_view());
     }
 
     /// Whether `m` acts: a file tab holding renderable markdown.
@@ -2022,15 +2044,12 @@ impl App {
         }
     }
 
-    /// Whether the open diff can split: source rows, a changed line, and both sides present.
+    /// Whether the open diff can split: source rows of a diff with a change on both sides.
     fn split_allowed(&self) -> bool {
-        let lines = || diff_lines(&self.diff.rows);
         self.tab.is_file_tab()
             && self.diff.view == View::Diff
             && !self.rendered.on_screen()
-            && lines().any(|r| matches!(r, Row::Deletion { .. } | Row::Insertion { .. }))
-            && lines().any(|r| r.old_no().is_some())
-            && lines().any(|r| r.new_no().is_some())
+            && self.diff.splits()
     }
 
     /// Whether the read pane is wide enough for split.
@@ -2041,18 +2060,18 @@ impl App {
     /// Whether split shows: chosen, allowed and fitting; held rows on screen keep their layout.
     fn wants_split(&self) -> bool {
         let held = self.view_frozen() || self.select_anchor.is_some() || self.divider_drag_active();
-        self.split_chosen == Some(true)
-            && self.split_allowed()
+        self.split_chosen == Some(DiffView::Split)
             && if held && !self.visible.is_empty() {
                 self.split_on_screen()
             } else {
-                self.split_fits()
+                self.split_allowed() && self.split_fits()
             }
     }
 
-    /// Whether split rows are on screen.
+    /// Whether split rows are on screen: there every row but a fold is a pair, elsewhere none.
     pub fn split_on_screen(&self) -> bool {
-        self.visible.iter().any(|v| matches!(v, Visible::Pair(_)))
+        let first = self.visible.iter().find(|v| v.fold_anchor().is_none());
+        first.is_some_and(|v| matches!(v, Visible::Pair(_)))
     }
 
     /// The layout on screen.
@@ -2066,9 +2085,9 @@ impl App {
         }
     }
 
-    /// Whether `|` acts: the open diff can split at this width, or split is on screen to leave.
+    /// Whether `|` acts: split is on screen to leave, or the open diff can split at this width.
     pub(crate) fn split_acts(&self) -> bool {
-        self.split_allowed() && (self.split_fits() || self.split_on_screen())
+        self.split_on_screen() || (self.split_allowed() && self.split_fits())
     }
 
     /// `|`: flip the diff between unified and split, where split can show; inert elsewhere.
@@ -2077,7 +2096,8 @@ impl App {
             return;
         }
         self.clear_selection();
-        self.split_chosen = Some(!self.split_on_screen());
+        let to = if self.split_on_screen() { DiffView::Unified } else { DiffView::Split };
+        self.split_chosen = Some(to);
         self.relayout();
     }
 
@@ -2095,7 +2115,10 @@ impl App {
     /// Rebuild the rows in another layout, the cursor keeping its line at the same screen height.
     fn relayout(&mut self) {
         let above = self.diff_cursor.saturating_sub(self.diff_scroll);
-        self.rebuild_visible();
+        // Only while the cursor is still the row painted there (Continuity: identity first).
+        let painted = self.cursor_line.get().filter(|&(row, _)| row == self.diff_cursor);
+        self.keep_above = painted.map(|(_, line)| line);
+        self.build_visible(true);
         self.diff_scroll = self.diff_cursor.saturating_sub(above);
         // The old rows' marks go with them; a navigator highlight was never on them.
         self.drop_read_marks();
@@ -2159,6 +2182,13 @@ impl App {
 
     /// Record the read pane's painted layout for the hit tests.
     pub(crate) fn note_painted_slots(&self, slots: Vec<crate::ui::Slot>) {
+        let cursor = self.diff_cursor;
+        self.cursor_line.set(
+            slots
+                .iter()
+                .position(|s| matches!(*s, crate::ui::Slot::Code { row, seg: 0 } if row == cursor))
+                .map(|line| (cursor, line)),
+        );
         *self.painted_slots.borrow_mut() = slots;
     }
 
@@ -2538,18 +2568,16 @@ impl App {
         }
         // Rows above the target fill about half of what the target leaves of the pane.
         let room = viewport.saturating_sub(heights[target]) / 2;
-        let mut top = target;
-        let mut above = 0;
-        while top > 0 && above + heights[top - 1] <= room {
-            top -= 1;
-            above += heights[top];
-        }
-        self.diff_scroll = top;
+        self.diff_scroll = top_leaving(heights, target, room);
     }
 
     /// Settle the scroll: a line jump centers (eating a same-event nudge), else nudge, then bound.
     pub fn settle_diff_scroll(&mut self, heights: &[usize], viewport: usize) {
         let nudge = std::mem::take(&mut self.reveal_diff);
+        if let Some(lines) = self.keep_above.take() {
+            let target = self.diff_cursor.min(heights.len().saturating_sub(1));
+            self.diff_scroll = top_leaving(heights, target, lines);
+        }
         if std::mem::take(&mut self.reveal_center) {
             self.center_diff_cursor(heights, viewport);
         } else if nudge || self.composing() {
@@ -2613,6 +2641,8 @@ impl App {
             self.stash.diff_scroll = 0;
             self.stash.h_scroll = 0;
             self.stash.select_anchor = None;
+            self.stash.switch_line = None;
+            self.stash.cursor_line = None;
             // `All files` keeps its tree; only the changed set rebuilds now.
             let build = crate::world::build_changed(&self.world_input())?;
             self.adopt_branch_base(build.branch_base);
@@ -2657,8 +2687,7 @@ impl App {
             if self.rendered.on_screen() != self.wants_rendered()
                 && !self.rendered.renders_nothing()
             {
-                self.rebuild_visible();
-                self.settle_read();
+                self.relayout();
             }
         }
         // A return paints its stash and refreshes behind; a first visit loads before the frame.
@@ -2882,6 +2911,7 @@ impl App {
         std::mem::swap(&mut self.diff, &mut self.stash.diff);
         std::mem::swap(&mut self.visible, &mut self.stash.visible);
         std::mem::swap(&mut self.switch_line, &mut self.stash.switch_line);
+        std::mem::swap(self.cursor_line.get_mut(), &mut self.stash.cursor_line);
         std::mem::swap(&mut self.expanded_folds, &mut self.stash.expanded_folds);
         std::mem::swap(&mut self.diff_path, &mut self.stash.diff_path);
         std::mem::swap(&mut self.diff_cursor, &mut self.stash.diff_cursor);
@@ -4311,12 +4341,11 @@ impl App {
                     hits.extend(folded.map(|new_no| FindHit::Folded { new_no }));
                     continue;
                 }
-                Visible::Row(row) => is_hit(&row.text()),
-                // A split row is one hit, matching on either half.
-                Visible::Pair(_) => [Side::Old, Side::New]
-                    .into_iter()
-                    .filter_map(|side| row.content_text(Some(side)))
-                    .any(|text| is_hit(&text)),
+                Visible::Row(row) | Visible::Pair(crate::split::Pair::Same(row)) => {
+                    is_hit(&row.text())
+                }
+                // A changed split row is one hit, matching on either half.
+                Visible::Pair(p) => p.halves().into_iter().flatten().any(|r| is_hit(&r.text())),
             };
             if here {
                 on_match = m;
@@ -5224,6 +5253,16 @@ fn step(cur: usize, delta: isize, n: usize) -> usize {
     }
 }
 
+/// The top row that leaves at most `lines` display lines above row `target`.
+fn top_leaving(heights: &[usize], target: usize, lines: usize) -> usize {
+    let (mut top, mut above) = (target, 0);
+    while top > 0 && above + heights[top - 1] <= lines {
+        top -= 1;
+        above += heights[top];
+    }
+    top
+}
+
 /// The minimal scroll that fits `cursor`'s row in the viewport, by display heights.
 fn keep_in_view(cursor: usize, scroll: usize, heights: &[usize], viewport: usize) -> usize {
     if viewport == 0 || heights.is_empty() {
@@ -5373,7 +5412,7 @@ fn is_change(row: &Row) -> bool {
 fn shows_change(v: &Visible) -> bool {
     match v {
         Visible::Row(row) => is_change(row),
-        Visible::Pair(p) => matches!(p, crate::split::Pair::Changed { .. }),
+        Visible::Pair(p) => !matches!(p, crate::split::Pair::Same(_)),
     }
 }
 
@@ -5539,7 +5578,7 @@ fn anchor(selected: &[Row]) -> Option<(Side, u32, u32, String)> {
 #[cfg(test)]
 mod tests {
     use super::{App, Mode, Visible};
-    use crate::config::NavigatorPosition;
+    use crate::config::{DiffView, NavigatorPosition};
     use crate::model::{Comment, CommitPick, Scope, Side};
     use crate::test_support::test_repo;
     use crate::world::{PickStatus, PickVerdict};
@@ -5602,7 +5641,7 @@ mod tests {
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.mode = Mode::List;
         old.markdown_rendered = true; // flipped to rendered, away from the default
-        old.split_chosen = Some(true);
+        old.split_chosen = Some(DiffView::Split);
         old.switch_line = Some((3, Side::Old, 2));
         old.rendered.content =
             Some(crate::rendered::Content { text: "# doc".to_string(), old: None, nothing: false });
@@ -5612,7 +5651,7 @@ mod tests {
         recovered.carry_authored_state_from(&mut old);
 
         assert!(recovered.markdown_rendered, "the pane's choice survives a modal's recovery");
-        assert_eq!(recovered.split_chosen, Some(true), "so does split");
+        assert_eq!(recovered.split_chosen, Some(DiffView::Split), "so does split");
         assert_eq!(recovered.switch_line, Some((3, Side::Old, 2)), "and the switch-back line");
         assert_eq!(recovered.rendered.text(), Some("# doc"));
         assert_eq!(
@@ -5857,7 +5896,7 @@ mod tests {
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         recovered.seed_from_config(&config);
         recovered.carry_authored_state_from(&mut old);
-        assert_eq!(recovered.split_chosen, Some(true), "the blocked pane never chose");
+        assert_eq!(recovered.split_chosen, Some(DiffView::Split), "the blocked pane never chose");
     }
 
     #[test]

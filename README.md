@@ -134,7 +134,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `:` | Jump to a line number (`:0` first, `:$` last) |
 | `w` | Toggle line wrap |
 | `m` | Flip markdown between rendered and source |
-| `\|` | Flip the diff between unified and split (needs about 135 columns) |
+| `\|` | Flip the diff between unified and split (needs a diff pane 137 columns wide) |
 | `p` | Rotate navigator |
 | `z` | Hide / show navigator |
 | `<` `>` | Grow / shrink navigator |
@@ -280,9 +280,9 @@ markdown_view = "rendered"
 ### Diff view
 
 The diff opens unified. `|` flips it to split, with old on the left and new on the right. Every
-file you open in the pane follows until you press `|` again. Split needs about 135 columns, so
-hide the navigator (`z`), move it (`p`), or use a zoomed or overlay placement. A narrower pane
-shows unified and keeps your choice. `diff_view = "split"` starts a fresh pane in split:
+file you open in the pane follows until you press `|` again. Split needs a diff pane 137
+columns wide, so hide the navigator (`z`), move it (`p`), or use a zoomed or overlay placement.
+A narrower pane shows unified and keeps your choice. `diff_view = "split"` starts a fresh pane in split:
 
 ```toml
 diff_view = "split"

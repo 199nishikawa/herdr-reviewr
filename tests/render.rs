@@ -5096,6 +5096,24 @@ fn the_cursor_fill_crosses_a_blank_half() {
     let filled =
         (1..70u16).filter(|&x| buf.cell((x, y)).is_some_and(|c| c.bg == CURSOR_BG)).count();
     assert!(filled > 60, "the blank old half takes the cursor fill: {filled}");
+    assert_eq!(buf.cell((70, y)).unwrap().bg, CURSOR_BG, "the divider too, so the row is one band");
+}
+
+#[test]
+fn a_held_split_narrower_than_its_gutters_keeps_the_divider_in_place() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Diff;
+    split_frame(&mut app, 142);
+    app.toggle_select();
+    let out = dump(&split_frame(&mut app, 13));
+    assert!(app.split_on_screen(), "the selection holds split");
+    let body = out.lines().filter(|l| l.starts_with('│'));
+    for line in body {
+        let line: Vec<char> = line.chars().collect();
+        assert_eq!(line[6], '│', "the divider stays at its column:\n{out}");
+    }
 }
 
 #[test]

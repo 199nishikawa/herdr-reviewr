@@ -7,8 +7,7 @@ use crate::split::Visible;
 /// Where a text drag lives, locked at mouse-down (`TS-ONE-SURFACE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
-    /// The read pane's rows, character-precise; a drag that starts in a split row's half stays
-    /// in that half's column.
+    /// The read pane's rows, character-precise, confined to the split half it started in.
     Read { side: Option<Side> },
     /// The `PR` read pane's painted lines: character-precise painted text.
     Painted,
@@ -217,12 +216,11 @@ mod tests {
 
     #[test]
     fn read_text_on_split_rows_reads_one_half_and_skips_blank_halves() {
-        let pair = |old: Option<Row>, new: Option<Row>| Visible::Pair(Pair::Changed { old, new });
         let rows = vec![
-            pair(Some(deletion("old one")), Some(insertion("new one"))),
-            pair(None, Some(insertion("added"))),
+            Visible::Pair(Pair::Both { old: deletion("old one"), new: insertion("new one") }),
+            Visible::Pair(Pair::New(insertion("added"))),
             fold(2),
-            pair(Some(deletion("gone")), None),
+            Visible::Pair(Pair::Old(deletion("gone"))),
         ];
         let (a, b) = (point(0, 4), point(3, 99));
         assert_eq!(read_text(&rows, Some(Side::Old), a, b), "one\ngone");

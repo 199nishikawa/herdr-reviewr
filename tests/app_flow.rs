@@ -4430,9 +4430,9 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
     assert!((src..=src_end).contains(&below), "the deletion maps to the line below it");
     assert!(app.visible[app.diff_cursor].text().contains("gamma"));
 
-    // And back: the diff cursor lands on that block's first line.
+    // And back: the diff cursor returns to the deletion it left.
     app.toggle_rendered();
-    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(src));
+    assert_eq!(app.diff_cursor, del);
 }
 
 #[test]
@@ -10518,6 +10518,49 @@ fn split_and_back_keeps_the_cursor_on_its_line() {
 }
 
 #[test]
+fn a_file_emptied_and_restored_under_split_keeps_the_cursor_on_its_line() {
+    let r = Repo::init();
+    let lines: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+    r.write("a.rs", &(lines.join("\n") + "\n"));
+    r.commit_all("init");
+    let mut changed = lines.clone();
+    changed[9] = "line ten".into();
+    let after = changed.join("\n") + "\n";
+    r.write("a.rs", &after);
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(10), Some(10)));
+
+    // An agent's write truncates first, and a refresh lands on the empty file.
+    r.write("a.rs", "");
+    common::land_world(&mut app);
+    app.sync_split_width(140);
+    r.write("a.rs", &after);
+    common::land_world(&mut app);
+    app.sync_split_width(140);
+    assert!(app.split_on_screen());
+    assert_eq!(cursor_lines(&app), (Some(10), Some(10)), "the reviewer's place survives");
+}
+
+#[test]
+fn a_refresh_leaving_the_file_one_sided_holds_an_open_selection() {
+    let r = split_flow_repo();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(2), Some(2)));
+    app.toggle_select();
+    let anchor = app.select_anchor;
+    r.write("a.rs", "");
+    common::land_world(&mut app);
+    app.sync_split_width(140);
+    assert!(app.split_on_screen(), "a flip waits while rows are selected");
+    assert_eq!(app.select_anchor, anchor, "the selection keeps its rows, as a refresh does");
+    app.clear_selection();
+    app.sync_split_width(140);
+    assert!(!app.split_on_screen(), "a one-sided file shows unified once the selection closes");
+}
+
+#[test]
 fn a_tab_round_trip_keeps_the_side_a_switch_came_from() {
     let keymap = Keymap::default();
     let r = split_flow_repo();
@@ -10543,6 +10586,22 @@ fn the_split_key_goes_where_its_label_points_while_a_selection_holds_unified() {
     assert!(!app.split_on_screen(), "the selection holds unified");
     press(&mut app, &keymap, KeyCode::Char('|'));
     assert!(app.split_on_screen(), "`| split` shows split");
+}
+
+#[test]
+fn rendered_and_back_returns_the_cursor_to_the_line_it_left() {
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\npara one\npara two\n\nkeep\n");
+    r.commit_all("init");
+    r.write("doc.md", "# T\n\npara one\npara TWO\n\nkeep\n");
+    let keymap = Keymap::default();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(4), Some(4)));
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.rendered_active());
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert_eq!(cursor_lines(&app), (Some(4), Some(4)), "not the paragraph's first line");
 }
 
 #[test]
@@ -11120,6 +11179,332 @@ fn a_wide_glyph_across_a_halfs_edge_is_never_copied() {
     };
     assert_eq!(drag_to_edge(&mut app, 0).len(), 73, "the old half shows 73 code columns");
     assert_eq!(drag_to_edge(&mut app, 1), "x".repeat(72), "`日` would cross the divider");
+}
+
+#[test]
+fn an_open_composer_or_text_drag_holds_split_through_a_narrower_pane() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    app.focus = Focus::Diff;
+    app.diff_cursor = one;
+    app.start_comment();
+    app.sync_split_width(90);
+    assert!(app.split_on_screen(), "the composer holds the rows its draft anchors to");
+    typed(&mut app, "note");
+    app.submit_comment();
+    let c = app.store.get(app.store.len() - 1).unwrap();
+    assert_eq!(c.lines, "-let old_one = 1;\n+let new_one = 1;", "both lines, as split showed");
+
+    let mut app = split_pane(&r);
+    let at = split_cell(&app, Side::Old, one, 2);
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), at);
+    app.sync_split_width(90);
+    assert!(app.split_on_screen(), "a live text drag holds split too");
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), at);
+}
+
+#[test]
+fn a_view_switch_keeps_the_cursor_at_its_screen_height() {
+    let r = Repo::init();
+    let lines = |word: &str| {
+        (1..=30).fold(String::new(), |mut s, n| {
+            use std::fmt::Write as _;
+            let _ = writeln!(s, "{word} {n}");
+            s
+        })
+    };
+    r.write("a.rs", &lines("old"));
+    r.commit_all("init");
+    r.write("a.rs", &lines("new"));
+    let keymap = Keymap::default();
+    let mut app = app_on(&r);
+    app.sync_split_width(140);
+    app.focus = Focus::Diff;
+    app.diff_scroll = 20;
+    app.diff_cursor = 25;
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(app.split_on_screen());
+    assert_eq!(app.diff_cursor - app.diff_scroll, 5, "split has half the rows, same height");
+    app.sync_split_width(90);
+    assert!(!app.split_on_screen());
+    assert_eq!(app.diff_cursor - app.diff_scroll, 5, "and so does a width flip back");
+}
+
+#[test]
+fn a_view_switch_under_wrap_keeps_the_cursor_at_its_screen_line() {
+    use herdr_reviewr::ui;
+    let r = Repo::init();
+    let lines = |word: &str| {
+        (1..=60).fold(String::new(), |mut s, n| {
+            use std::fmt::Write as _;
+            let _ = writeln!(s, "{word} {n:02} {}", "z".repeat(80));
+            s
+        })
+    };
+    r.write("a.rs", &lines("old"));
+    r.commit_all("init");
+    r.write("a.rs", &lines("new"));
+    let keymap = Keymap::default();
+    let mut app = split_pane(&r);
+    app.wrap = true;
+    app.focus = Focus::Diff;
+    app.diff_scroll = 10;
+    app.diff_cursor = 13;
+    let frame = |app: &mut App| {
+        let heights = ui::diff_row_heights(app, SPLIT_AREA);
+        app.settle_diff_scroll(&heights, ui::diff_viewport_height(SPLIT_AREA, app));
+        let backend = ratatui::backend::TestBackend::new(SPLIT_AREA.width, SPLIT_AREA.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::render(f, app)).unwrap();
+        ui::diff_row_heights(app, SPLIT_AREA)[app.diff_scroll..app.diff_cursor].iter().sum()
+    };
+    let above: usize = frame(&mut app);
+    assert_eq!(above, 9, "each split row wraps to three lines");
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(!app.split_on_screen());
+    assert_eq!(frame(&mut app), above, "unified rows are one line each, so nine rows above");
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(app.split_on_screen());
+    assert_eq!(frame(&mut app), above, "and back: three split rows of three lines");
+}
+
+#[test]
+fn a_tab_swapping_in_narrower_keeps_its_own_screen_line() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::ui;
+    let r = Repo::init();
+    let lines = |word: &str| {
+        (1..=60).fold(String::new(), |mut s, n| {
+            use std::fmt::Write as _;
+            let _ = writeln!(s, "{word} {n:02} {}", "z".repeat(80));
+            s
+        })
+    };
+    r.write("a.rs", &lines("old"));
+    r.commit_all("init");
+    r.write("a.rs", &lines("new"));
+    let mut app = split_pane(&r);
+    app.wrap = true;
+    app.focus = Focus::Diff;
+    app.diff_scroll = 10;
+    app.diff_cursor = 13;
+    let frame = |app: &mut App, area: Rect| {
+        app.sync_split_width(ui::diff_inner_width(area, app));
+        let heights = ui::diff_row_heights(app, area);
+        app.settle_diff_scroll(&heights, ui::diff_viewport_height(area, app));
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::render(f, app)).unwrap();
+        ui::diff_row_heights(app, area)[app.diff_scroll..app.diff_cursor].iter().sum::<usize>()
+    };
+    let above = frame(&mut app, SPLIT_AREA);
+    assert_eq!(above, 9);
+    let narrow = Rect::new(0, 0, 120, 30);
+    enter_tab(&mut app, Tab::AllFiles);
+    frame(&mut app, narrow);
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(frame(&mut app, narrow), above, "not All files' screen line for row 13");
+    assert!(!app.split_on_screen());
+}
+
+#[test]
+fn a_tab_following_m_from_rendered_into_split_keeps_its_screen_line() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::ui;
+    let r = Repo::init();
+    let doc = |word: &str| {
+        (1..=40).fold(String::new(), |mut s, n| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{word} para {n}\n\n");
+            s
+        })
+    };
+    r.write("doc.md", &doc("old"));
+    r.commit_all("init");
+    r.write("doc.md", &doc("new"));
+    let mut app =
+        common::app_on_config(&r, "diff_view = \"split\"\nmarkdown_view = \"rendered\"\n");
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Diff;
+    let frame = |app: &mut App| {
+        app.sync_rendered_width(ui::rendered_width(SPLIT_AREA, app));
+        app.sync_split_width(ui::diff_inner_width(SPLIT_AREA, app));
+        let heights = ui::diff_row_heights(app, SPLIT_AREA);
+        app.settle_diff_scroll(&heights, ui::diff_viewport_height(SPLIT_AREA, app));
+        let backend = ratatui::backend::TestBackend::new(SPLIT_AREA.width, SPLIT_AREA.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::render(f, app)).unwrap();
+        ui::diff_row_heights(app, SPLIT_AREA)[app.diff_scroll..app.diff_cursor]
+            .iter()
+            .sum::<usize>()
+    };
+    frame(&mut app);
+    assert!(app.rendered_active());
+    app.diff_scroll = 20;
+    app.diff_cursor = 24;
+    let above = frame(&mut app);
+    assert_eq!(above, 4);
+    enter_tab(&mut app, Tab::AllFiles);
+    frame(&mut app);
+    app.toggle_rendered();
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(frame(&mut app), above, "the line it showed, not a rendered slot's row");
+    assert!(app.split_on_screen());
+}
+
+#[test]
+fn a_tab_following_m_into_unified_keeps_its_screen_line() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::ui;
+    let r = Repo::init();
+    let doc = |word: &str| {
+        (1..=40).fold(String::new(), |mut s, n| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{word} para {n}\n\n");
+            s
+        })
+    };
+    r.write("doc.md", &doc("old"));
+    r.commit_all("init");
+    r.write("doc.md", &doc("new"));
+    let mut app = common::app_on_rendered(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Diff;
+    let frame = |app: &mut App| {
+        app.sync_rendered_width(ui::rendered_width(SPLIT_AREA, app));
+        app.sync_split_width(ui::diff_inner_width(SPLIT_AREA, app));
+        let heights = ui::diff_row_heights(app, SPLIT_AREA);
+        app.settle_diff_scroll(&heights, ui::diff_viewport_height(SPLIT_AREA, app));
+        let backend = ratatui::backend::TestBackend::new(SPLIT_AREA.width, SPLIT_AREA.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::render(f, app)).unwrap();
+        ui::diff_row_heights(app, SPLIT_AREA)[app.diff_scroll..app.diff_cursor]
+            .iter()
+            .sum::<usize>()
+    };
+    frame(&mut app);
+    app.diff_scroll = 20;
+    app.diff_cursor = 24;
+    let above = frame(&mut app);
+    assert_eq!(above, 4);
+    enter_tab(&mut app, Tab::AllFiles);
+    frame(&mut app);
+    app.toggle_rendered();
+    enter_tab(&mut app, Tab::Changes);
+    assert!(!app.split_on_screen() && !app.rendered_active());
+    assert_eq!(frame(&mut app), above, "the line it showed under rendered, as m in place keeps");
+}
+
+#[test]
+fn a_click_that_releases_a_held_split_keeps_the_clicked_row_under_the_mouse() {
+    use herdr_reviewr::ui;
+    let r = Repo::init();
+    let lines = |word: &str| {
+        (1..=60).fold(String::new(), |mut s, n| {
+            use std::fmt::Write as _;
+            let _ = writeln!(s, "{word} {n:02}");
+            s
+        })
+    };
+    r.write("a.rs", &lines("old"));
+    r.commit_all("init");
+    r.write("a.rs", &lines("new"));
+    let keymap = Keymap::default();
+    let mut app = split_pane(&r);
+    app.wrap = false;
+    app.focus = Focus::Diff;
+    app.diff_scroll = 0;
+    app.diff_cursor = 2;
+    let narrow = Rect::new(0, 0, 120, 30);
+    let frame = |app: &mut App, area: Rect| -> usize {
+        app.sync_split_width(ui::diff_inner_width(area, app));
+        let heights = ui::diff_row_heights(app, area);
+        app.settle_diff_scroll(&heights, ui::diff_viewport_height(area, app));
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::render(f, app)).unwrap();
+        ui::diff_row_heights(app, area)[app.diff_scroll..app.diff_cursor].iter().sum()
+    };
+    assert_eq!(frame(&mut app, SPLIT_AREA), 2);
+    press(&mut app, &keymap, KeyCode::Char('v'));
+    assert_eq!(frame(&mut app, narrow), 2);
+    assert!(app.split_on_screen(), "the selection holds split");
+    let inner = ui::read_inner_rect(narrow, &app);
+    let at = (inner.x + 10, inner.y + 20);
+    mouse_in(narrow, &mut app, MouseEventKind::Down(MouseButton::Left), at.0, at.1);
+    mouse_in(narrow, &mut app, MouseEventKind::Up(MouseButton::Left), at.0, at.1);
+    assert!(app.select_anchor.is_none());
+    assert_eq!(app.diff_cursor, 20);
+    let line = frame(&mut app, narrow);
+    assert!(!app.split_on_screen(), "the released split flips to unified");
+    assert_eq!(line, 20, "not the old cursor's line");
+}
+
+#[test]
+fn a_split_drag_scrolls_sideways_up_to_the_widest_half() {
+    let r = Repo::init();
+    r.write("w.rs", "short old\nkeep\n");
+    r.commit_all("init");
+    r.write("w.rs", &format!("{}\nkeep\n", "y".repeat(150)));
+    let mut app = split_pane(&r);
+    app.wrap = false;
+    let widest = herdr_reviewr::ui::widest_visible_row(&app, SPLIT_AREA);
+    assert_eq!(widest, 150, "the new half's line");
+    let row = row_of(&app, (Some(1), Some(1)));
+    let (divider, y) = split_cell(&app, Side::New, row, -6);
+    let start = split_cell(&app, Side::Old, row, 0);
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), start);
+    for _ in 0..100 {
+        split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), (divider, y));
+    }
+    assert_eq!(app.h_scroll, widest - 1, "an old-half drag scrolls as far as the widest half");
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), (divider, y));
+}
+
+#[test]
+fn the_split_key_types_a_pipe_in_find_and_the_composer() {
+    let keymap = Keymap::default();
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    open_find(&mut app, &keymap);
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert_eq!(app.find_query(), Some("|"), "find takes the pipe");
+    assert!(app.split_on_screen());
+    press(&mut app, &keymap, KeyCode::Esc);
+
+    app.focus = Focus::Diff;
+    app.start_comment();
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(app.input.ends_with('|') && app.split_on_screen(), "the composer takes it too");
+}
+
+#[test]
+fn a_wrapped_rows_padding_beside_the_shorter_half_takes_no_gutter_click() {
+    let r = Repo::init();
+    r.write("w.rs", &format!("{}\nkeep\n", "x".repeat(200)));
+    r.commit_all("init");
+    r.write("w.rs", "short\nkeep\n");
+    let mut app = split_pane(&r);
+    app.wrap = true;
+    let pad = split_cell(&app, Side::New, 1, -3);
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), pad);
+    assert!(!app.gutter_drag(), "the new half paints no gutter on the old line's wrap");
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), pad);
+    let wrap = split_cell(&app, Side::Old, 1, -3);
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), wrap);
+    assert!(app.gutter_drag(), "the old half's wrap paints its bar, as unified does");
+}
+
+#[test]
+fn a_click_on_the_divider_lands_on_the_row() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    app.focus = Focus::Files;
+    let two = row_of(&app, (Some(3), None));
+    let divider = split_cell(&app, Side::New, two, -6);
+    split_click(&mut app, divider);
+    assert_eq!((app.focus, app.diff_cursor), (Focus::Diff, two));
 }
 
 #[test]

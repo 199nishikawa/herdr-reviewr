@@ -271,7 +271,7 @@ impl UnifiedRow for herdr_reviewr::split::Visible {
 }
 
 /// A fresh pane over `repo`, seeded from a config file holding `toml`.
-fn app_on_config(repo: &Repo, toml: &str) -> App {
+pub fn app_on_config(repo: &Repo, toml: &str) -> App {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("config.toml"), toml).unwrap();
     let config = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
