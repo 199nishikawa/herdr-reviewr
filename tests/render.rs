@@ -5156,6 +5156,8 @@ fn the_split_key_shows_where_it_acts_and_names_its_destination() {
     let r = split_repo();
     let mut app = app_on(&r);
     app.toggle_navigator_hidden();
+    let out = dump(&split_frame(&mut app, 142));
+    assert!(!out.contains("| split"), "`|` stays off the footer's main row: {out}");
     app.toggle_keys();
     let out = dump(&split_frame(&mut app, 142));
     assert!(out.contains("| split"), "{out}");

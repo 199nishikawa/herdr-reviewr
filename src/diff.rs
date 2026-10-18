@@ -7,6 +7,7 @@ use std::path::Path;
 use similar::{ChangeTag, TextDiff};
 
 use crate::highlight::Highlighter;
+use crate::model::Side;
 use crate::text::{line_body, lines};
 
 /// An 8-bit RGB color.
@@ -88,10 +89,10 @@ impl Row {
     }
 
     /// The line on `side`, if this row holds one.
-    pub fn no(&self, side: crate::model::Side) -> Option<u32> {
+    pub fn no(&self, side: Side) -> Option<u32> {
         match side {
-            crate::model::Side::Old => self.old_no(),
-            crate::model::Side::New => self.new_no(),
+            Side::Old => self.old_no(),
+            Side::New => self.new_no(),
         }
     }
 
@@ -235,10 +236,16 @@ impl FileDiff {
     #[must_use]
     pub fn splits(&self) -> bool {
         let (mut old, mut new, mut change) = (false, false, false);
-        for row in crate::marks::diff_lines(&self.rows) {
-            old |= row.old_no().is_some();
-            new |= row.new_no().is_some();
-            change |= matches!(row, Row::Deletion { .. } | Row::Insertion { .. });
+        // A fold holds context, lines on both sides, so its lines need no walk.
+        for row in &self.rows {
+            let (o, n) = match row {
+                Row::Deletion { .. } => (true, false),
+                Row::Insertion { .. } => (false, true),
+                Row::Context { .. } | Row::Fold { .. } => (true, true),
+                Row::Rendered { .. } => (false, false),
+            };
+            (old, new) = (old | o, new | n);
+            change |= o != n;
             if old && new && change {
                 return true;
             }

@@ -19,7 +19,7 @@ use crate::marks::{MarkMap, Unit, diff_lines};
 use crate::model::{ChangeKind, ChangedFile, Comment, CommentStore, CommitPick, Rev, Scope, Side};
 use crate::rendered::{Built, Content, OldMap, RenderedIndex, RenderedInput, RenderedView, RowId};
 use crate::roles::Palette;
-use crate::split::Visible;
+use crate::split::{Pair, Visible};
 use crate::theme;
 use crate::world::{Changeset, PickStatus, PickVerdict};
 
@@ -99,7 +99,6 @@ struct TabStash {
     diff_scroll: usize,
     h_scroll: usize,
     select_anchor: Option<usize>,
-    switch_line: Option<(usize, Side, u32)>,
     cursor_line: Option<(usize, usize)>,
     comment_target: Option<u64>,
     rendered: RenderedView,
@@ -1039,7 +1038,6 @@ impl App {
         self.navigator_hidden = old.navigator_hidden;
         // A pane born blocked never chose, so the recovered pane's seed stands.
         self.split_chosen = old.split_chosen.or(self.split_chosen);
-        self.split_width = old.split_width;
         // A hidden navigator keeps focus on the read pane.
         if self.navigator_hidden {
             self.focus = Focus::Diff;
@@ -1305,7 +1303,7 @@ impl App {
     fn clicked_target_text(&self) -> Option<String> {
         let click = self.last_click?;
         let crate::selection::Surface::Read { side } = click.surface else { return None };
-        self.visible.get(click.target)?.content_text(side)
+        self.visible.get(click.target)?.text_row(side).map(Row::text)
     }
 
     /// Reload the open view; only a different file resets it and drops an armed crossing.
@@ -1432,7 +1430,6 @@ impl App {
         self.rendered.built = None;
         self.rendered.drop_rows();
         self.visible.clear();
-        self.switch_line = None;
         self.drop_read_marks();
     }
 
@@ -1444,9 +1441,11 @@ impl App {
     /// Build `visible`, rendered else source; `choose` (a view switch) picks split or unified anew.
     /// The one rebuild site, so it carries the place, the find band, and the marks.
     fn build_visible(&mut self, choose: bool) {
+        // The last switch's line serves only the next switch, on the rows it landed on.
+        let kept = self.switch_line.take();
+        let remembered = kept.filter(|_| choose);
         let clicked_before = self.clicked_target_text();
         let was_rendered = self.rendered.on_screen();
-        let was_split = self.split_on_screen();
         // A line map, only when the text moved under the rendered rows.
         let text = self.rendered.text().unwrap_or_default();
         let edit = was_rendered
@@ -1455,47 +1454,48 @@ impl App {
             .filter(|b| b.input.text != text)
             .map(|b| LineMap::new(&b.input.text, text));
         let spot_at = |i: usize| -> Spot {
+            // The line the last switch landed on, on the rows it landed on.
+            let remembered = remembered.filter(|&(row, ..)| row == i).map(|(_, side, n)| (side, n));
             if was_rendered {
                 // A rendered row's current line: its unit's first line, through the edit.
                 let unit = self.rendered.index.unit_at(i);
                 let new = unit.map(|u| u.src).map(|src| edit.as_ref().map_or(src, |m| m.line(src)));
-                // The line a switch landed here from, while its block still holds it.
-                let holds = |side, n| {
-                    side == Side::Old || unit.is_some_and(|u| (u.src..=u.src_end).contains(&n))
-                };
-                let remembered = self
-                    .switch_line
-                    .filter(|&(row, side, n)| row == i && edit.is_none() && holds(side, n))
-                    .map(|(_, side, n)| (side, n));
                 return Spot { new, at: remembered.or(new.map(|n| (Side::New, n))) };
             }
-            // The line a view switch landed on, while the cursor still sits on its row.
-            let remembered = self
-                .switch_line
-                .filter(|&(row, side, n)| {
-                    row == i && numbers_on(&self.visible[i], side).any(|m| m == n)
-                })
-                .map(|(_, side, n)| (side, n));
-            Spot {
-                new: source_line_at(&self.visible, i),
-                at: remembered.or_else(|| line_ref_at(&self.visible, i)),
-            }
+            // A remembered new line, else the row's: a fold's first line is not the one it hides.
+            let new = remembered
+                .filter(|&(side, _)| side == Side::New)
+                .map(|(_, n)| n)
+                .or_else(|| source_line_at(&self.visible, i));
+            let old_only =
+                self.visible.get(i).filter(|v| v.new_no().is_none()).and_then(Visible::old_no);
+            let own = old_only.map(|n| (Side::Old, n)).or(new.map(|n| (Side::New, n)));
+            Spot { new, at: remembered.or(own) }
         };
         let place = (!self.visible.is_empty()).then(|| {
             let anchor = self.select_anchor.map(spot_at);
             (self.shown(), spot_at(self.diff_cursor), spot_at(self.diff_scroll), anchor)
         });
+        // Rendered rows built from the same input, base numbers included, still hold that line.
+        let input_before = kept
+            .filter(|_| !choose && was_rendered)
+            .and_then(|_| self.rendered.built.as_ref().map(|b| b.input.clone()));
         let rendered = self.wants_rendered() && self.rebuild_rendered(edit.as_ref());
+        if rendered
+            && let Some(before) = input_before
+            && self.rendered.built.as_ref().is_some_and(|b| b.input == before)
+        {
+            self.switch_line = kept;
+        }
         if !rendered {
             if !self.wants_rendered() {
                 self.rendered.built = None;
             }
             // Source rows on screen: no render, marks, or index stand behind them.
             self.rendered.drop_rows();
-            let split = if choose || place.is_none() {
-                self.wants_split()
-            } else {
-                was_split && self.diff.view == View::Diff
+            let split = match place {
+                Some((from, ..)) if !choose => from == Shown::Split && self.diff.view == View::Diff,
+                _ => self.wants_split(),
             };
             let rows = self.diff.rows.iter().flat_map(|row| match row {
                 Row::Fold { lines }
@@ -1505,11 +1505,16 @@ impl App {
                 }
                 _ => vec![row.clone()],
             });
-            self.visible = if split {
+            let rows: Vec<Visible> = if split {
                 crate::split::split_rows(rows.collect(), &self.diff.pairs)
             } else {
                 rows.map(Visible::Row).collect()
             };
+            // Source rows a refresh rebuilds unchanged still hold that line.
+            if kept.is_some() && !choose && !was_rendered && rows == self.visible {
+                self.switch_line = kept;
+            }
+            self.visible = rows;
         }
         // Across layouts, the place crosses by line.
         if let Some((from, cursor, scroll, anchor)) = place
@@ -1524,7 +1529,7 @@ impl App {
             };
             if let Some(i) = to(cursor) {
                 self.diff_cursor = i;
-                self.switch_line = cursor.at.map(|(side, n)| (i, side, n));
+                self.switch_line = cursor.at.filter(|_| choose).map(|(side, n)| (i, side, n));
             }
             if let Some(i) = to(scroll) {
                 self.diff_scroll = i;
@@ -2057,15 +2062,14 @@ impl App {
         self.split_width >= crate::ui::SPLIT_MIN_WIDTH
     }
 
-    /// Whether split shows: chosen, allowed and fitting; held rows on screen keep their layout.
+    /// Whether split is due: chosen, allowed and fitting.
     fn wants_split(&self) -> bool {
-        let held = self.view_frozen() || self.select_anchor.is_some() || self.divider_drag_active();
-        self.split_chosen == Some(DiffView::Split)
-            && if held && !self.visible.is_empty() {
-                self.split_on_screen()
-            } else {
-                self.split_allowed() && self.split_fits()
-            }
+        self.split_chosen == Some(DiffView::Split) && self.split_allowed() && self.split_fits()
+    }
+
+    /// Whether the rows on screen hold their layout: a modal, a gesture or a row selection is open.
+    fn layout_held(&self) -> bool {
+        self.view_frozen() || self.select_anchor.is_some() || self.divider_drag_active()
     }
 
     /// Whether split rows are on screen: there every row but a fold is a pair, elsewhere none.
@@ -2101,13 +2105,13 @@ impl App {
         self.relayout();
     }
 
-    /// Show split when it is chosen and fits, else unified, from the first frame at a new width.
+    /// Show the layout due at this width before the frame, once no held rows are on screen.
     pub fn sync_split_width(&mut self, width: usize) {
         if width == 0 || !self.tab.is_file_tab() {
             return;
         }
         self.split_width = width;
-        if self.wants_split() != self.split_on_screen() {
+        if !self.layout_held() && self.wants_split() != self.split_on_screen() {
             self.relayout();
         }
     }
@@ -2641,7 +2645,6 @@ impl App {
             self.stash.diff_scroll = 0;
             self.stash.h_scroll = 0;
             self.stash.select_anchor = None;
-            self.stash.switch_line = None;
             self.stash.cursor_line = None;
             // `All files` keeps its tree; only the changed set rebuilds now.
             let build = crate::world::build_changed(&self.world_input())?;
@@ -2673,6 +2676,8 @@ impl App {
         if self.line_open() || (tab == Tab::Pr && self.mode == Mode::Find) {
             self.close_find();
         }
+        // A switch's line serves the next switch in the tab it was made in.
+        self.switch_line = None;
         self.tab = tab;
         // `PR` leaves the file tabs frozen and refetches behind its last snapshot.
         if tab == Tab::Pr {
@@ -2683,10 +2688,11 @@ impl App {
         if self.active_file_tab != tab {
             self.swap_active_with_stash();
             self.active_file_tab = tab;
-            // Follow a markdown choice flipped while away.
+            // Follow a markdown choice flipped while away; a selection's rows don't cross, as on `m`.
             if self.rendered.on_screen() != self.wants_rendered()
                 && !self.rendered.renders_nothing()
             {
+                self.clear_selection();
                 self.relayout();
             }
         }
@@ -2910,7 +2916,6 @@ impl App {
         std::mem::swap(&mut self.toggled_dirs, &mut self.stash.toggled_dirs);
         std::mem::swap(&mut self.diff, &mut self.stash.diff);
         std::mem::swap(&mut self.visible, &mut self.stash.visible);
-        std::mem::swap(&mut self.switch_line, &mut self.stash.switch_line);
         std::mem::swap(self.cursor_line.get_mut(), &mut self.stash.cursor_line);
         std::mem::swap(&mut self.expanded_folds, &mut self.stash.expanded_folds);
         std::mem::swap(&mut self.diff_path, &mut self.stash.diff_path);
@@ -3838,14 +3843,14 @@ impl App {
     /// The selection's `(side, start, end, snippet)`, rendered or not, by one `anchor()` (G1).
     fn selection_anchor(&self) -> Option<(Side, u32, u32, String)> {
         if self.rendered.on_screen() {
-            return anchor(&self.rendered_anchor_rows());
+            return anchor(self.rendered_anchor_rows());
         }
-        anchor(&self.source_anchor_rows())
+        anchor(self.source_anchor_rows())
     }
 
     /// The source rows a rendered selection stands for: its new-side span, deletions, and owned changes.
     /// A comment on them equals the source comment on the same rows.
-    fn rendered_anchor_rows(&self) -> Vec<Row> {
+    fn rendered_anchor_rows(&self) -> Vec<&Row> {
         let (lo, hi) = self.selection_range();
         let units: Vec<&crate::rendered::UnitRows> =
             self.rendered.index.units().iter().filter(|u| u.end > lo && u.start <= hi).collect();
@@ -3872,12 +3877,12 @@ impl App {
                 });
                 within || owned()
             })
-            .map(|(_, row)| row.clone())
+            .map(|(_, row)| row)
             .collect()
     }
 
     /// The diff lines a source selection's rows hold, either layout, in diff order.
-    fn source_anchor_rows(&self) -> Vec<Row> {
+    fn source_anchor_rows(&self) -> Vec<&Row> {
         let (lo, hi) = self.selection_range();
         let picked = self.visible.get(lo..=hi).unwrap_or(&[]);
         let olds: HashSet<u32> = picked.iter().filter_map(Visible::old_no).collect();
@@ -3887,7 +3892,6 @@ impl App {
                 row.old_no().is_some_and(|n| olds.contains(&n))
                     || row.new_no().is_some_and(|n| news.contains(&n))
             })
-            .cloned()
             .collect()
     }
 
@@ -4341,11 +4345,9 @@ impl App {
                     hits.extend(folded.map(|new_no| FindHit::Folded { new_no }));
                     continue;
                 }
-                Visible::Row(row) | Visible::Pair(crate::split::Pair::Same(row)) => {
-                    is_hit(&row.text())
-                }
-                // A changed split row is one hit, matching on either half.
-                Visible::Pair(p) => p.halves().into_iter().flatten().any(|r| is_hit(&r.text())),
+                Visible::Row(row) => is_hit(&row.text()),
+                // A split row is one hit, matching on either half.
+                Visible::Pair(p) => p.rows().any(|r| is_hit(&r.text())),
             };
             if here {
                 on_match = m;
@@ -5412,7 +5414,7 @@ fn is_change(row: &Row) -> bool {
 fn shows_change(v: &Visible) -> bool {
     match v {
         Visible::Row(row) => is_change(row),
-        Visible::Pair(p) => !matches!(p, crate::split::Pair::Same(_)),
+        Visible::Pair(p) => !matches!(p, Pair::Same(_)),
     }
 }
 
@@ -5483,15 +5485,6 @@ struct Spot {
     at: Option<(Side, u32)>,
 }
 
-/// The line row `i` is on, by side: an old-only row's old line, else the current line it stands for.
-fn line_ref_at(rows: &[Visible], i: usize) -> Option<(Side, u32)> {
-    let v = rows.get(i)?;
-    match (v.old_no(), v.new_no()) {
-        (Some(old), None) => Some((Side::Old, old)),
-        _ => source_line_at(rows, i).map(|n| (Side::New, n)),
-    }
-}
-
 /// The current line row `i` stands for, else a fold's first, the next below, the next above.
 fn source_line_at(rows: &[Visible], i: usize) -> Option<u32> {
     let line_of = |v: &Visible| match v.row() {
@@ -5504,11 +5497,11 @@ fn source_line_at(rows: &[Visible], i: usize) -> Option<u32> {
 
 /// The line numbers on `side` that row `v` holds, a collapsed fold's hidden ones included.
 fn numbers_on(v: &Visible, side: Side) -> impl Iterator<Item = u32> + '_ {
-    let hidden = match v {
-        Visible::Row(Row::Fold { lines }) => lines.as_slice(),
-        _ => &[],
+    let rows = match v {
+        Visible::Row(row) => std::slice::from_ref(row),
+        Visible::Pair(p) => p.half(side).map_or(&[][..], std::slice::from_ref),
     };
-    v.no(side).into_iter().chain(hidden.iter().filter_map(move |l| l.no(side)))
+    diff_lines(rows).filter_map(move |l| l.no(side))
 }
 
 /// The row holding `line` by `side`: its own, the fold hiding it, the next, or the last numbered.
@@ -5554,11 +5547,11 @@ fn line_in(c: &Comment, v: &Visible) -> bool {
 }
 
 /// The `(side, start, end, snippet)` of diff rows: new side unless all deletions.
-fn anchor(selected: &[Row]) -> Option<(Side, u32, u32, String)> {
+fn anchor<'a>(selected: impl IntoIterator<Item = &'a Row>) -> Option<(Side, u32, u32, String)> {
     let mut new: Option<(u32, u32)> = None;
     let mut old: Option<(u32, u32)> = None;
     let mut snippet = String::new();
-    for row in selected.iter().filter(|row| row.is_content()) {
+    for row in selected {
         if !snippet.is_empty() {
             snippet.push('\n');
         }

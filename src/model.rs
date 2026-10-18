@@ -122,16 +122,6 @@ pub enum Side {
     Old,
 }
 
-impl Side {
-    #[must_use]
-    pub fn other(self) -> Side {
-        match self {
-            Side::New => Side::Old,
-            Side::Old => Side::New,
-        }
-    }
-}
-
 /// A reviewer comment anchored to a run of diff lines, carrying the snippet.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Comment {

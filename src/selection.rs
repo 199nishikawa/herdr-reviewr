@@ -1,5 +1,6 @@
 //! Mouse text selection as pure data, and the clipboard text of what it spans.
 
+use crate::diff::Row;
 use crate::file_list::{self, RowKind};
 use crate::model::Side;
 use crate::split::Visible;
@@ -68,7 +69,7 @@ pub fn read_text(rows: &[Visible], side: Option<Side>, a: Point, b: Point) -> St
     let hi_row = b.row.min(rows.len().saturating_sub(1));
     let mut out = Vec::new();
     for (i, row) in rows.iter().enumerate().take(hi_row + 1).skip(a.row) {
-        let Some(text) = row.content_text(side) else { continue };
+        let Some(text) = row.text_row(side).map(Row::text) else { continue };
         let from = if i == a.row { a.chr } else { 0 };
         let to = if i == hi_row { Some(b.chr) } else { None };
         out.push(slice_chars(&text, from, to));

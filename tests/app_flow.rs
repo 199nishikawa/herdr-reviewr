@@ -10561,7 +10561,35 @@ fn a_refresh_leaving_the_file_one_sided_holds_an_open_selection() {
 }
 
 #[test]
-fn a_tab_round_trip_keeps_the_side_a_switch_came_from() {
+fn a_width_flip_drops_a_copied_highlight_its_rows_no_longer_hold() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    let at = split_cell(&app, Side::New, one, 1);
+    split_click(&mut app, at);
+    split_click(&mut app, at);
+    assert_eq!(last_copy().as_deref(), Some("let"));
+    app.sync_split_width(100);
+    assert!(!app.split_on_screen());
+    assert!(app.settled_selection().is_none(), "never on the deletion that reads `let` too");
+}
+
+#[test]
+fn an_unrelated_refresh_keeps_the_side_a_switch_came_from() {
+    let keymap = Keymap::default();
+    let r = split_flow_repo();
+    let mut app = app_on(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(2), None));
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    r.write("other.rs", "x\n");
+    common::land_world(&mut app);
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert_eq!(cursor_lines(&app), (Some(2), None), "the rows didn't change, so the line holds");
+}
+
+#[test]
+fn a_tab_round_trip_ends_the_side_a_switch_came_from() {
     let keymap = Keymap::default();
     let r = split_flow_repo();
     let mut app = app_on(&r);
@@ -10570,8 +10598,13 @@ fn a_tab_round_trip_keeps_the_side_a_switch_came_from() {
     press(&mut app, &keymap, KeyCode::Char('|'));
     enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
     enter_tab(&mut app, herdr_reviewr::app::Tab::Changes);
+    assert_eq!(cursor_lines(&app), (Some(2), Some(2)), "the tab keeps its place");
     press(&mut app, &keymap, KeyCode::Char('|'));
-    assert_eq!(cursor_lines(&app), (Some(2), None), "back on the deletion it left");
+    assert_eq!(
+        cursor_lines(&app),
+        (None, Some(2)),
+        "the return rebuilt the rows: a split row's new line"
+    );
 }
 
 #[test]
@@ -10602,6 +10635,132 @@ fn rendered_and_back_returns_the_cursor_to_the_line_it_left() {
     assert!(app.rendered_active());
     press(&mut app, &keymap, KeyCode::Char('m'));
     assert_eq!(cursor_lines(&app), (Some(4), Some(4)), "not the paragraph's first line");
+}
+
+#[test]
+fn rendered_and_back_through_a_fold_returns_to_its_block() {
+    let paras = (1..=20).fold(String::new(), |mut s, n| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "para {n}\n\n");
+        s
+    });
+    let r = Repo::init();
+    r.write("doc.md", &format!("# T\n\n{paras}"));
+    r.commit_all("init");
+    r.write("doc.md", &format!("# Title\n\n{paras}"));
+    let keymap = Keymap::default();
+    let mut app = common::app_on_rendered(&r);
+    app.focus = Focus::Diff;
+    let src = |app: &App| match *app.visible[app.diff_cursor].unified() {
+        herdr_reviewr::diff::Row::Rendered { src, .. } => src,
+        _ => panic!("the cursor is on a rendered row"),
+    };
+    app.diff_cursor = (0..app.visible.len())
+        .find(|&i| {
+            matches!(*app.visible[i].unified(), herdr_reviewr::diff::Row::Rendered { src: 41, .. })
+        })
+        .unwrap();
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(!app.rendered_active());
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert_eq!(src(&app), 41, "`para 20`, not the fold's first block");
+}
+
+#[test]
+fn a_base_moving_under_rendered_ends_the_remembered_old_line() {
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\n\npara one\ngone line\n\nkeep\n");
+    r.commit_all("init");
+    r.write("doc.md", "# T\n\npara one\n\nkeep\n");
+    let keymap = Keymap::default();
+    let mut app = common::app_on_rendered(&r);
+    app.focus = Focus::Diff;
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(!app.rendered_active());
+    cursor_to(&mut app, (Some(5), None));
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.rendered_active());
+    // A commit drops the blank line: old line 5 is now a blank context line, the text unchanged.
+    r.write("doc.md", "# T\n\npara one\ngone line\n\nkeep\n");
+    r.commit_all("drop a blank");
+    r.write("doc.md", "# T\n\npara one\n\nkeep\n");
+    common::land_world(&mut app);
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert_ne!(cursor_lines(&app), (Some(5), Some(4)), "never the blank that took old line 5");
+}
+
+#[test]
+fn a_refresh_that_changes_nothing_keeps_a_rendered_switch_back_line() {
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\npara one\ngone\n\nkeep\n");
+    r.commit_all("init");
+    r.write("doc.md", "# T\n\npara one\n\nkeep\n");
+    let keymap = Keymap::default();
+    let mut app = common::app_on_rendered(&r);
+    app.focus = Focus::Diff;
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    cursor_to(&mut app, (Some(4), None));
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.rendered_active());
+    common::land_world(&mut app);
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert_eq!(cursor_lines(&app), (Some(4), None), "back on the deletion it left");
+}
+
+#[test]
+fn a_pr_tab_round_trip_ends_the_side_a_switch_came_from() {
+    use herdr_reviewr::app::Tab;
+    let keymap = Keymap::default();
+    let r = split_flow_repo();
+    let mut app = app_on(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(2), None));
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    app.set_tab(Tab::Pr).unwrap();
+    app.set_tab(Tab::Changes).unwrap();
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert_eq!(cursor_lines(&app), (None, Some(2)), "a split row's new line, as from any tab");
+}
+
+#[test]
+fn a_tab_following_m_clears_its_selection_as_m_does() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\npara one\n\nkeep\n");
+    r.commit_all("init");
+    r.write("doc.md", "# T\n\npara ONE\n\nkeep\n");
+    let keymap = Keymap::default();
+    let mut app = common::app_on_rendered(&r);
+    app.focus = Focus::Diff;
+    app.toggle_select();
+    app.set_tab(Tab::AllFiles).unwrap();
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    app.set_tab(Tab::Changes).unwrap();
+    assert!(!app.rendered_active(), "the tab follows `m`");
+    assert_eq!(app.select_anchor, None, "a selection's rows hold other lines in source");
+}
+
+#[test]
+fn a_refresh_between_two_switches_ends_the_remembered_line() {
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\npara one\npara two\npara three\n\nkeep\n");
+    r.commit_all("init");
+    r.write("doc.md", "# T\n\npara one\npara TWO\npara three\n\nkeep\n");
+    let keymap = Keymap::default();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (Some(4), Some(4)));
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.rendered_active());
+    // The agent adds a line atop the paragraph: new line 4 is now `para one`, not `para TWO`.
+    r.write("doc.md", "# T\n\npara zero\npara one\npara TWO\npara three\n\nkeep\n");
+    common::land_world(&mut app);
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert_eq!(
+        app.visible[app.diff_cursor].new_no(),
+        Some(3),
+        "the block's first line, never a stale one"
+    );
 }
 
 #[test]
@@ -10826,6 +10985,25 @@ fn hunk_steps_and_goto_line_land_on_split_rows() {
 }
 
 #[test]
+fn goto_line_and_a_round_trip_in_split_go_by_the_new_numbers() {
+    let r = Repo::init();
+    let lines: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+    r.write("a.rs", &(lines.join("\n") + "\n"));
+    r.commit_all("init");
+    r.write("a.rs", &format!("top\n{}\n", lines.join("\n")));
+    let keymap = Keymap::default();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    app.focus = Focus::Diff;
+    app.goto_line(10);
+    assert_eq!(cursor_lines(&app), (Some(9), Some(10)), "`:10` is new line 10, old line 9");
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert_eq!(cursor_lines(&app), (Some(9), Some(10)));
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert_eq!(cursor_lines(&app), (Some(9), Some(10)));
+}
+
+#[test]
 fn split_to_unified_lands_a_changed_row_on_its_new_line_else_its_old() {
     let keymap = Keymap::default();
     let r = rewrite_repo();
@@ -11025,6 +11203,85 @@ fn a_split_comment_covers_the_fill_rows_inside_its_lines() {
     press(&mut app, &keymap, KeyCode::Esc);
     press(&mut app, &keymap, KeyCode::Char('d'));
     assert!(app.store.is_empty());
+}
+
+#[test]
+fn a_comment_made_in_one_layout_covers_its_lines_in_the_other() {
+    let keymap = Keymap::default();
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(!app.split_on_screen());
+    let (del_one, del_two) = (row_of(&app, (Some(2), None)), row_of(&app, (Some(3), None)));
+    assert_eq!(comment_rows(&mut app, (del_one, del_two)).0, Side::Old);
+
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(app.split_on_screen());
+    let (one, two) = (row_of(&app, (Some(2), Some(2))), row_of(&app, (Some(3), None)));
+    let (cards, marked) = app.comment_marks();
+    assert_eq!(cards, [(two, 0)], "the card sits under the row holding its last old line");
+    assert!(marked.contains(&one) && marked.contains(&two), "{marked:?}");
+    app.diff_cursor = one;
+    press(&mut app, &keymap, KeyCode::Char('e'));
+    assert_eq!(app.mode, Mode::Composing { editing: Some(0) });
+    press(&mut app, &keymap, KeyCode::Esc);
+
+    // A split comment on a facing pair, back in unified.
+    let three = row_of(&app, (Some(4), Some(3)));
+    comment_rows(&mut app, (three, three));
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    let ins_three = row_of(&app, (None, Some(3)));
+    let (cards, marked) = app.comment_marks();
+    assert!(cards.iter().any(|&(row, _)| row == ins_three), "{cards:?}");
+    assert!(marked.contains(&ins_three), "{marked:?}");
+}
+
+#[test]
+fn n_and_shift_n_step_through_split_comments() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    let two = row_of(&app, (Some(3), None));
+    let three = row_of(&app, (Some(4), Some(3)));
+    comment_rows(&mut app, (one, two));
+    comment_rows(&mut app, (three, three));
+    app.diff_cursor = 0;
+    app.jump_comment(1);
+    assert_eq!(app.diff_cursor, one);
+    app.jump_comment(1);
+    assert_eq!(app.diff_cursor, three);
+    app.jump_comment(-1);
+    assert_eq!(app.diff_cursor, one);
+}
+
+#[test]
+fn edit_on_a_split_fill_row_opens_the_nearest_new_line_above() {
+    let keymap = Keymap::default();
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_of(&app, (Some(3), None));
+    press(&mut app, &keymap, KeyCode::Char('e'));
+    assert_eq!(
+        app.editor_request.map(|t| t.line),
+        Some(2),
+        "`old two` has no new line; line 2 is above"
+    );
+}
+
+#[test]
+fn a_split_copy_highlight_survives_an_unrelated_refresh() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    let at = split_cell(&app, Side::New, one, 5);
+    split_click(&mut app, at);
+    split_click(&mut app, at);
+    assert_eq!(last_copy().as_deref(), Some("new_one"));
+    r.write("other.rs", "x\n");
+    common::land_world(&mut app);
+    assert!(app.split_on_screen());
+    assert!(app.settled_selection().is_some(), "the new half's word still reads the same");
 }
 
 #[test]

@@ -609,11 +609,13 @@ pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize>
     let gutter_w = gutter_for(&app.diff);
     // A half's gutter is painted only on its own lines, never on a blank half or its padding.
     let hit = match &app.visible[li] {
-        Visible::Pair(p) => [Side::Old, Side::New].into_iter().any(|side| {
-            let (x0, width) = column(&pane, Some(side));
-            let lines = |r: &Row| row_height(r, gutter_w, width, app.wrap);
-            p.half(side).is_some_and(|r| seg < lines(r)) && in_gutter(x0)
-        }),
+        Visible::Pair(p) => {
+            let heights = half_heights(p, gutter_w, pane.inner.width as usize, app.wrap);
+            [Side::Old, Side::New]
+                .into_iter()
+                .zip(heights)
+                .any(|(side, lines)| seg < lines && in_gutter(column(&pane, Some(side)).0))
+        }
         Visible::Row(row) => row.is_content() && in_gutter(pane.inner.x as usize),
     };
     hit.then_some(li)
@@ -681,9 +683,11 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
                     let sel = (li > lo.row || painted.src >= lo.chr)
                         && (li < hi.row || painted.src <= hi.chr);
                     // A rendered line wider than its pane is clipped there, and so is its tint.
-                    for x in (x..x + painted.w).take_while(|&x| x < max_x).filter(|_| sel) {
-                        if let Some(cell) = frame.buffer_mut().cell_mut((x as u16, y)) {
-                            paint_selected(cell, p);
+                    if sel {
+                        for x in (x..x + painted.w).take_while(|&x| x < max_x) {
+                            if let Some(cell) = frame.buffer_mut().cell_mut((x as u16, y)) {
+                                paint_selected(cell, p);
+                            }
                         }
                     }
                     x += painted.w;
@@ -1910,8 +1914,12 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// The line-number column width for a diff of `rows` lines.
-fn gutter_width(rows: usize) -> usize {
-    rows.to_string().len().max(3)
+const fn gutter_width(rows: usize) -> usize {
+    let digits = match rows.checked_ilog10() {
+        Some(log) => log as usize + 1,
+        None => 1,
+    };
+    if digits < 3 { 3 } else { digits }
 }
 
 /// The gutter width for a whole `FileDiff`, so a fold toggle never resizes it.
@@ -1939,7 +1947,7 @@ fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
 
 /// The narrowest read pane that shows split: two 60-column halves, the longest file's gutters.
 pub const SPLIT_MIN_WIDTH: usize =
-    2 * (gutter_prefix_width(crate::diff::MAX_LINES.ilog10() as usize + 1) + 60) + 1;
+    2 * (gutter_prefix_width(gutter_width(crate::diff::MAX_LINES)) + 60) + 1;
 
 /// A split row's halves' widths: the divider's column between them.
 fn half_widths(width: usize) -> (usize, usize) {
@@ -1992,22 +2000,26 @@ pub fn read_drag_columns(area: Rect, app: &App, side: Option<Side>) -> (u16, u16
 fn visible_height(v: &Visible, gutter_w: usize, width: usize, wrap: bool) -> usize {
     match v {
         Visible::Row(row) => row_height(row, gutter_w, width, wrap),
-        Visible::Pair(p) => {
-            let (l, r) = half_widths(width);
-            let [old, new] = p.halves();
-            let height =
-                |row: Option<&Row>, w: usize| row.map_or(0, |r| row_height(r, gutter_w, w, wrap));
-            height(old, l).max(height(new, r))
-        }
+        // The left half is never the wider, so an unchanged line wraps tallest there.
+        Visible::Pair(Pair::Same(row)) => row_height(row, gutter_w, half_widths(width).0, wrap),
+        Visible::Pair(p) => half_heights(p, gutter_w, width, wrap).into_iter().max().unwrap_or(0),
     }
+}
+
+/// A split row's halves' display heights, old then new; a blank half is 0.
+fn half_heights(p: &Pair, gutter_w: usize, width: usize, wrap: bool) -> [usize; 2] {
+    let (l, r) = half_widths(width);
+    let [old, new] = p.halves();
+    let height = |row: Option<&Row>, w: usize| row.map_or(0, |r| row_height(r, gutter_w, w, wrap));
+    [height(old, l), height(new, r)]
 }
 
 /// A painted row's widest code line, in cells.
 fn visible_code_width(v: &Visible) -> usize {
     let cells = |row: &Row| -> usize { plain_cells(row).iter().map(|c| c.w).sum() };
     match v {
-        Visible::Row(row) | Visible::Pair(Pair::Same(row)) => cells(row),
-        Visible::Pair(p) => p.halves().into_iter().flatten().map(cells).max().unwrap_or(0),
+        Visible::Row(row) => cells(row),
+        Visible::Pair(p) => p.rows().map(cells).max().unwrap_or(0),
     }
 }
 
@@ -2184,7 +2196,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     // `0` is an unnumbered PR snippet row; file diffs are 1-based.
     let num = row
         .no(numbered)
-        .or_else(|| row.no(numbered.other()))
+        .or_else(|| row.old_no())
         .filter(|&n| n > 0)
         .map_or(String::new(), |n| n.to_string());
     let (bar, bar_ink, tint) = match row.marker() {

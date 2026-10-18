@@ -36,6 +36,16 @@ impl Pair {
     pub fn halves(&self) -> [Option<&Row>; 2] {
         [self.half(Side::Old), self.half(Side::New)]
     }
+
+    /// Each row this pair holds once: an unchanged line's one row, else its halves.
+    pub fn rows(&self) -> impl Iterator<Item = &Row> {
+        match self {
+            Pair::Same(row) => [Some(row), None],
+            _ => self.halves(),
+        }
+        .into_iter()
+        .flatten()
+    }
 }
 
 /// One screen row of the diff pane: a unified row, or a split pair.
@@ -94,19 +104,13 @@ impl Visible {
         self.row().and_then(Row::fold_anchor)
     }
 
-    /// The content row a copy or a click reads: a split row's half on `side`, never a fold or gap.
+    /// The content row a copy or a click reads: a split row's half on `side`, never a fold or blank half.
     #[must_use]
     pub fn text_row(&self, side: Option<Side>) -> Option<&Row> {
         match self {
             Visible::Row(row) => row.is_content().then_some(row),
             Visible::Pair(p) => p.half(side?),
         }
-    }
-
-    /// The text a copy reads here, per [`Visible::text_row`].
-    #[must_use]
-    pub fn content_text(&self, side: Option<Side>) -> Option<String> {
-        self.text_row(side).map(Row::text)
     }
 }
 
@@ -361,6 +365,25 @@ mod tests {
                 pair(2),
                 pair(3),
                 (None, Some("unique_line();".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn leftovers_on_both_sides_between_anchors_face_by_position() {
+        let d = build(
+            "let alpha = one + 1;\nzzzz qqqq\nwwww\nlet omega = two + 1;\n",
+            "let alpha = one + 2;\nkkkk\nlet omega = two + 2;\n",
+        );
+        let rows = split_rows(d.rows.clone(), &d.pairs);
+        assert_each_line_once(&d, &rows);
+        assert_eq!(
+            changed(&rows),
+            [
+                (Some("let alpha = one + 1;".into()), Some("let alpha = one + 2;".into())),
+                (Some("zzzz qqqq".into()), Some("kkkk".into())),
+                (Some("wwww".into()), None),
+                (Some("let omega = two + 1;".into()), Some("let omega = two + 2;".into())),
             ]
         );
     }
