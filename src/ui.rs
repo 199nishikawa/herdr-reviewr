@@ -26,7 +26,7 @@ use crate::model::{ChangeKind, ChangedFile, Comment};
 use crate::roles::Palette;
 use crate::roles::{Fill, Ink};
 use crate::snippet::{snippet_caption_sign, snippet_row_is_comment};
-use crate::split::{Half, Pair, Visible};
+use crate::split::{Pair, Visible};
 use std::fmt::Write as _;
 
 /// Paint one frame, and say when an age it painted next reads differently, at most a minute out:
@@ -516,35 +516,42 @@ pub fn read_content_rect(area: Rect, app: &App) -> Rect {
     inner
 }
 
-/// The selection point under `(col, row)` on a code line of the read pane.
+/// The selection point under `(col, row)` on a code line of the read pane, with the half it is
+/// in on a split row.
 #[must_use]
-pub fn read_point_at(area: Rect, app: &App, col: u16, row: u16) -> Option<crate::selection::Point> {
+pub fn read_point_at(
+    area: Rect,
+    app: &App,
+    col: u16,
+    row: u16,
+) -> Option<(Option<Side>, crate::selection::Point)> {
     let pane = read_pane(area, app);
     if !contains(pane.inner, col, row) {
-        return None;
-    }
-    // The gutter is chrome with its own gestures.
-    if (col as usize) < pane.inner.x as usize + pane.prefix_w {
         return None;
     }
     let slots = app.painted_slots();
     let Slot::Code { row: li, seg } = *slots.get((row - pane.inner.y) as usize)? else {
         return None;
     };
-    let r = app.visible[li].row().filter(|r| r.is_content())?;
-    let code_width = (pane.inner.width as usize).saturating_sub(pane.prefix_w).max(1);
-    let col_in_code = (col as usize).saturating_sub(pane.inner.x as usize + pane.prefix_w);
-    Some(crate::selection::Point {
-        row: li,
-        chr: seg_char_at(app, r, seg, code_width, col_in_code),
-    })
+    let side = match app.visible[li] {
+        Visible::Pair(_) => Some(side_at(&pane, col)?),
+        Visible::Row(_) => None,
+    };
+    let (x0, width, r) = text_column(app, &pane, li, side)?;
+    // The gutter is chrome with its own gestures.
+    let col_in_code = (col as usize).checked_sub(x0 + pane.prefix_w)?;
+    let code_width = width.saturating_sub(pane.prefix_w).max(1);
+    let chr = seg_char_at(app, &r, seg, code_width, col_in_code);
+    Some((side, crate::selection::Point { row: li, chr }))
 }
 
-/// `read_point_at` for a drag's moving end, clamped to the nearest code line (`TS-ONE-SURFACE`).
+/// `read_point_at` for a drag's moving end, clamped to the nearest code line (`TS-ONE-SURFACE`)
+/// and to `side`'s half of a split row.
 #[must_use]
 pub fn read_point_clamped(
     area: Rect,
     app: &App,
+    side: Option<Side>,
     col: u16,
     row: u16,
 ) -> Option<crate::selection::Point> {
@@ -561,33 +568,37 @@ pub fn read_point_clamped(
         .chain(at + 1..slots.len())
         .find(|&i| matches!(slots.get(i), Some(Slot::Code { .. })))?;
     let Slot::Code { row: li, seg } = slots[code] else { return None };
-    // A fold paints as one Code slot; snap its endpoint to the row's start.
-    let Some(r) = app.visible[li].row().filter(|r| r.is_content()) else {
+    // A fold or a blank half paints no text; snap its endpoint to the row's start.
+    let Some((x0, width, r)) = text_column(app, &pane, li, side) else {
         return Some(crate::selection::Point { row: li, chr: 0 });
     };
-    let code_width = (pane.inner.width as usize).saturating_sub(pane.prefix_w).max(1);
-    let col_in_code = (col as usize).saturating_sub(pane.inner.x as usize + pane.prefix_w);
+    let code_width = width.saturating_sub(pane.prefix_w).max(1);
+    let col_in_code = (col as usize).saturating_sub(x0 + pane.prefix_w);
     Some(crate::selection::Point {
         row: li,
-        chr: seg_char_at(app, r, seg, code_width, col_in_code),
+        chr: seg_char_at(app, &r, seg, code_width, col_in_code),
     })
 }
 
-/// The commentable row whose gutter `(col, row)` lands on, continuation lines included.
+/// The commentable row whose gutter `(col, row)` lands on, continuation lines included; a split
+/// row has one per half.
 #[must_use]
 pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
     if app.tab == Tab::Pr {
         return None;
     }
     let pane = read_pane(area, app);
-    if !contains(pane.inner, col, row) || (col as usize) >= pane.inner.x as usize + pane.prefix_w {
+    if !contains(pane.inner, col, row) {
         return None;
     }
     let slots = app.painted_slots();
-    match *slots.get((row - pane.inner.y) as usize)? {
-        Slot::Code { row: li, .. } if app.visible[li].is_content() => Some(li),
-        _ => None,
-    }
+    let Slot::Code { row: li, .. } = *slots.get((row - pane.inner.y) as usize)? else {
+        return None;
+    };
+    let in_gutter = |x0: usize| (x0..x0 + pane.prefix_w).contains(&(col as usize));
+    let right =
+        matches!(app.visible[li], Visible::Pair(_)) && in_gutter(half_column(&pane, Side::New).0);
+    (app.visible[li].is_content() && (in_gutter(pane.inner.x as usize) || right)).then_some(li)
 }
 
 /// Paint one selected cell on the selection fill; text on a match or caret becomes body text.
@@ -631,23 +642,23 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         }
-        Surface::Read => {
+        Surface::Read { side } => {
             let pane = read_pane(area, app);
             let slots = app.painted_slots();
-            let code_width = (pane.inner.width as usize).saturating_sub(pane.prefix_w).max(1);
             for (off, slot) in slots.iter().enumerate() {
                 let Slot::Code { row: li, seg } = *slot else { continue };
                 if li < lo.row || li > hi.row {
                     continue;
                 }
-                let Some(row_ref) = app.visible[li].row().filter(|r| r.is_content()) else {
+                let Some((x0, width, row_ref)) = text_column(app, &pane, li, side) else {
                     continue;
                 };
-                let cells = plain_cells(row_ref);
-                let (seg_s, seg_e) = seg_cell_range(app, row_ref, &cells, seg, code_width);
+                let code_width = width.saturating_sub(pane.prefix_w).max(1);
+                let cells = plain_cells(&row_ref);
+                let (seg_s, seg_e) = seg_cell_range(app, &row_ref, &cells, seg, code_width);
                 let y = pane.inner.y + off as u16;
-                let max_x = (pane.inner.x + pane.inner.width) as usize;
-                let mut x = pane.inner.x as usize + pane.prefix_w;
+                let max_x = x0 + width;
+                let mut x = x0 + pane.prefix_w;
                 for painted in &cells[seg_s..seg_e] {
                     let sel = (li > lo.row || painted.src >= lo.chr)
                         && (li < hi.row || painted.src <= hi.chr);
@@ -1925,24 +1936,49 @@ fn half_widths(width: usize) -> (usize, usize) {
     (left, width.saturating_sub(1 + left))
 }
 
-/// A half as the one-line row it paints: unchanged context, or a deletion or an insertion,
-/// numbered with its own side's line.
-fn half_row(h: &Half, side: Side, changed: bool) -> Row {
-    let spans = h.spans.clone();
-    let (emphasis, cr) = (h.emphasis.clone(), h.cr);
-    match (changed, side) {
-        (false, _) => Row::Context { old_no: h.no, new_no: h.no, spans },
-        (true, Side::Old) => Row::Deletion { old_no: h.no, spans, emphasis, cr },
-        (true, Side::New) => Row::Insertion { new_no: h.no, spans, emphasis, cr },
+/// A pair's halves as rows, old then new; a blank half is `None`.
+fn pair_rows(p: &Pair) -> [Option<Row>; 2] {
+    [p.half(Side::Old), p.half(Side::New)]
+}
+
+/// A split row's half on `side`: its left edge and width in the read pane.
+fn half_column(pane: &ReadPane, side: Side) -> (usize, usize) {
+    let (lw, rw) = half_widths(pane.inner.width as usize);
+    match side {
+        Side::Old => (pane.inner.x as usize, lw),
+        Side::New => (pane.inner.x as usize + lw + 1, rw),
     }
 }
 
-/// A pair's halves as rows, old then new; a blank half is `None`.
-fn pair_rows(p: &Pair) -> [Option<Row>; 2] {
-    [
-        p.old.as_ref().map(|h| half_row(h, Side::Old, p.changed)),
-        p.new.as_ref().map(|h| half_row(h, Side::New, p.changed)),
-    ]
+/// The half of a split row under display column `col`; the divider is neither.
+fn side_at(pane: &ReadPane, col: u16) -> Option<Side> {
+    let divider = half_column(pane, Side::Old).1 + pane.inner.x as usize;
+    match (col as usize).cmp(&divider) {
+        std::cmp::Ordering::Less => Some(Side::Old),
+        std::cmp::Ordering::Greater => Some(Side::New),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// A read-pane row's text column: its left edge, width and content row, a split row's on
+/// `side`; a fold, a blank half or a sideless split row has none.
+fn text_column<'a>(
+    app: &'a App,
+    pane: &ReadPane,
+    li: usize,
+    side: Option<Side>,
+) -> Option<(usize, usize, std::borrow::Cow<'a, Row>)> {
+    let (x0, width, row) = match (app.visible.get(li)?, side) {
+        (Visible::Row(r), _) => {
+            (pane.inner.x as usize, pane.inner.width as usize, std::borrow::Cow::Borrowed(r))
+        }
+        (Visible::Pair(p), Some(side)) => {
+            let (x0, width) = half_column(pane, side);
+            (x0, width, std::borrow::Cow::Owned(p.half(side)?))
+        }
+        (Visible::Pair(_), None) => return None,
+    };
+    row.is_content().then_some((x0, width, row))
 }
 
 /// A painted row's display height: a split row is as tall as its taller half.

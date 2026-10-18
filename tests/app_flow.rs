@@ -6725,7 +6725,7 @@ fn ts_one_surface_a_drag_clamps_to_its_pane_and_skips_cards() {
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), files.x + 2, files.y + 1);
     let drag = app.text_drag().expect("drag still live");
-    assert_eq!(drag.surface, Surface::Read);
+    assert_eq!(drag.surface, Surface::Read { side: None });
     assert!(drag.extent.row < app.visible.len());
     press(&mut app, &Keymap::default(), KeyCode::Esc);
 
@@ -7284,7 +7284,7 @@ fn a_rendered_drag_selects_and_copies_through_the_read_surface() {
     // A drag over the rendered heading copies its text.
     let (c0, r0) = sel_cell(&app, 0, 0);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
-    assert_eq!(app.text_drag().map(|d| d.surface), Some(Surface::Read));
+    assert_eq!(app.text_drag().map(|d| d.surface), Some(Surface::Read { side: None }));
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), c0 + 40, r0);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c0 + 40, r0);
     assert_eq!(last_copy().as_deref(), Some("Title"), "the rendered heading copies");
@@ -10606,4 +10606,229 @@ fn diff_view_split_opens_split_and_a_reread_never_flips_it() {
     app.reload().unwrap();
     app.sync_split_width(140);
     assert!(app.split_on_screen(), "a reread never flips a running pane");
+}
+
+const SPLIT_AREA: Rect = Rect::new(0, 0, 160, 30);
+
+/// A rewrite: `old one` faces `new one`, `old two` faces nothing, `old three` faces `new three`.
+fn rewrite_repo() -> Repo {
+    let r = Repo::init();
+    r.write("w.rs", "keep\nlet old_one = 1;\nold two\nlet old_three = 3;\nend\n");
+    r.commit_all("init");
+    r.write("w.rs", "keep\nlet new_one = 1;\nlet new_three = 3;\nend\n");
+    r
+}
+
+/// A split pane over `r`, the navigator hidden, laid out for [`SPLIT_AREA`].
+fn split_pane(r: &Repo) -> App {
+    let mut app = common::app_on_split(r);
+    app.toggle_navigator_hidden();
+    app.sync_split_width(herdr_reviewr::ui::diff_inner_width(SPLIT_AREA, &app));
+    assert!(app.split_on_screen());
+    app
+}
+
+/// Paint a split frame, then dispatch one mouse event, as the event loop does.
+fn split_mouse(app: &mut App, kind: MouseEventKind, (col, row): (u16, u16)) {
+    let backend = ratatui::backend::TestBackend::new(SPLIT_AREA.width, SPLIT_AREA.height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| herdr_reviewr::ui::render(f, app)).unwrap();
+    let heights = herdr_reviewr::ui::diff_row_heights(app, SPLIT_AREA);
+    let event = MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE };
+    handle_mouse(app, event, SPLIT_AREA, &heights, &Keymap::default(), &SelClipboard).unwrap();
+}
+
+/// A click: press and release on one cell.
+fn split_click(app: &mut App, at: (u16, u16)) {
+    split_mouse(app, MouseEventKind::Down(MouseButton::Left), at);
+    split_mouse(app, MouseEventKind::Up(MouseButton::Left), at);
+}
+
+/// The screen cell of `(row, display column)` in `side`'s half; a negative column is the gutter.
+fn split_cell(app: &App, side: Side, row: usize, col: i16) -> (u16, u16) {
+    let inner = herdr_reviewr::ui::read_inner_rect(SPLIT_AREA, app);
+    let left = (inner.width - 1) / 2;
+    let x0 = match side {
+        Side::Old => inner.x,
+        Side::New => inner.x + left + 1,
+    };
+    (x0.checked_add_signed(5 + col).unwrap(), inner.y + u16::try_from(row).unwrap())
+}
+
+/// The row holding these old and new lines.
+fn row_of(app: &App, lines: (Option<u32>, Option<u32>)) -> usize {
+    app.visible.iter().position(|v| (v.old_no(), v.new_no()) == lines).unwrap()
+}
+
+/// Comment `rows` and return the new comment's anchor and snippet.
+fn comment_rows(app: &mut App, (lo, hi): (usize, usize)) -> (Side, u32, u32, String) {
+    app.focus = Focus::Diff;
+    app.diff_cursor = lo;
+    if hi > lo {
+        app.toggle_select();
+        app.diff_cursor = hi;
+    }
+    app.start_comment();
+    typed(app, "note");
+    app.submit_comment();
+    let c = app.store.get(app.store.len() - 1).unwrap();
+    (c.side, c.start, c.end, c.lines.clone())
+}
+
+#[test]
+fn a_split_comment_equals_unifieds_for_the_same_lines() {
+    let r = rewrite_repo();
+    let mut split = split_pane(&r);
+    let mut unified = app_on(&r);
+    let one = row_of(&split, (Some(2), Some(2)));
+    let two = row_of(&split, (Some(3), None));
+    let three = row_of(&split, (Some(4), Some(3)));
+    let del_one = row_of(&unified, (Some(2), None));
+    let del_two = row_of(&unified, (Some(3), None));
+    let ins_three = row_of(&unified, (None, Some(3)));
+
+    // A facing pair: the new line's number, `-` then `+`; unified rows can't pick these two alone.
+    let from_split = comment_rows(&mut split, (one, one));
+    assert_eq!(from_split, (Side::New, 2, 2, "-let old_one = 1;\n+let new_one = 1;".into()));
+
+    // A deletion-only row: the removed line, as unified.
+    let from_split = comment_rows(&mut split, (two, two));
+    assert_eq!(from_split, (Side::Old, 3, 3, "-old two".into()));
+    assert_eq!(comment_rows(&mut unified, (del_two, del_two)), from_split);
+
+    // The whole rewrite: every `-`, then every `+`.
+    let from_split = comment_rows(&mut split, (one, three));
+    let want =
+        "-let old_one = 1;\n-old two\n-let old_three = 3;\n+let new_one = 1;\n+let new_three = 3;";
+    assert_eq!(from_split, (Side::New, 2, 3, want.into()));
+    assert_eq!(comment_rows(&mut unified, (del_one, ins_three)), from_split);
+}
+
+#[test]
+fn a_split_comment_covers_the_fill_rows_inside_its_lines() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    let two = row_of(&app, (Some(3), None));
+    let three = row_of(&app, (Some(4), Some(3)));
+    comment_rows(&mut app, (one, three));
+    let (cards, marked) = app.comment_marks();
+    assert_eq!(cards, [(three, 0)], "the card sits under the comment's last row");
+    assert!([one, two, three].iter().all(|r| marked.contains(r)), "{marked:?}");
+
+    // `e` and `d` on the fill row act on the comment covering it.
+    let keymap = Keymap::default();
+    app.diff_cursor = two;
+    press(&mut app, &keymap, KeyCode::Char('e'));
+    assert_eq!(app.mode, Mode::Composing { editing: Some(0) });
+    press(&mut app, &keymap, KeyCode::Esc);
+    press(&mut app, &keymap, KeyCode::Char('d'));
+    assert!(app.store.is_empty());
+}
+
+#[test]
+fn a_selection_ending_on_a_fill_row_keeps_its_card_and_mark() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    let two = row_of(&app, (Some(3), None));
+    assert_eq!(
+        comment_rows(&mut app, (one, two)),
+        (Side::New, 2, 2, "-let old_one = 1;\n-old two\n+let new_one = 1;".into())
+    );
+    let (cards, marked) = app.comment_marks();
+    assert_eq!(cards, [(one, 0)], "the card sits under the last row holding its new line");
+    assert!(marked.contains(&one));
+}
+
+#[test]
+fn find_hits_a_split_row_on_either_half() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    app.open_find();
+    typed(&mut app, "old two");
+    assert_eq!(app.find_count().map(|(_, n)| n), Some(1));
+    app.find_step(1);
+    assert_eq!(app.diff_cursor, row_of(&app, (Some(3), None)));
+
+    // A rewrite matching on both halves is one row, one hit.
+    app.close_find();
+    app.open_find();
+    typed(&mut app, "= 1;");
+    assert_eq!(app.find_count().map(|(_, n)| n), Some(1));
+}
+
+#[test]
+fn a_split_text_drag_stays_in_its_column() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    let three = row_of(&app, (Some(4), Some(3)));
+    let (start, end) = (split_cell(&app, Side::Old, one, 4), split_cell(&app, Side::Old, three, 7));
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), start);
+    // Past the divider, the extent still reads the old column.
+    let past = (end.0 + 70, end.1);
+    split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), past);
+    assert_eq!(
+        herdr_reviewr::drag_text(&app, SPLIT_AREA).as_deref(),
+        Some("old_one = 1;\nold two\nlet old_three = 3;")
+    );
+    split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), end);
+    assert_eq!(
+        herdr_reviewr::drag_text(&app, SPLIT_AREA).as_deref(),
+        Some("old_one = 1;\nold two\nlet old_")
+    );
+    press(&mut app, &Keymap::default(), KeyCode::Esc);
+
+    // The new column skips the blank half facing `old two`.
+    let (start, end) =
+        (split_cell(&app, Side::New, one, 0), split_cell(&app, Side::New, three, 30));
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), start);
+    split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), end);
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), end);
+    assert_eq!(last_copy().as_deref(), Some("let new_one = 1;\nlet new_three = 3;"));
+}
+
+#[test]
+fn a_double_and_triple_click_copy_from_the_clicked_half() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    let at = split_cell(&app, Side::Old, one, 5);
+    split_click(&mut app, at);
+    split_click(&mut app, at);
+    assert_eq!(last_copy().as_deref(), Some("old_one"));
+    split_click(&mut app, at);
+    assert_eq!(last_copy().as_deref(), Some("let old_one = 1;"));
+}
+
+#[test]
+fn a_click_on_either_half_lands_on_the_row() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    app.focus = Focus::Files;
+    let two = row_of(&app, (Some(3), None));
+    let (old, new) = (split_cell(&app, Side::Old, two, 2), split_cell(&app, Side::New, two, 2));
+    split_click(&mut app, old);
+    assert_eq!((app.focus, app.diff_cursor), (Focus::Diff, two));
+
+    app.diff_cursor = 0;
+    split_click(&mut app, new);
+    assert_eq!(app.diff_cursor, two, "a click on the blank half lands on the row too");
+}
+
+#[test]
+fn a_drag_in_the_right_gutter_selects_rows() {
+    let r = rewrite_repo();
+    let mut app = split_pane(&r);
+    let one = row_of(&app, (Some(2), Some(2)));
+    let three = row_of(&app, (Some(4), Some(3)));
+    let (start, end) =
+        (split_cell(&app, Side::New, one, -3), split_cell(&app, Side::New, three, -3));
+    split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), start);
+    assert!(app.gutter_drag());
+    split_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), end);
+    assert_eq!(app.selection_range(), (one, three));
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), end);
+    assert!(app.composing(), "the gutter release opens the composer");
 }

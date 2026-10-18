@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::diff::{CharRange, Row, Span, change_blocks};
+use crate::model::Side;
 
 /// One side's line, as a split half paints it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -20,6 +21,24 @@ pub struct Pair {
     pub new: Option<Half>,
     /// `false` for an unchanged line shown on both halves.
     pub changed: bool,
+}
+
+impl Pair {
+    /// A half as the one-line row it paints: unchanged context, or a deletion or an insertion,
+    /// numbered with its own side's line; a blank half is `None`.
+    #[must_use]
+    pub fn half(&self, side: Side) -> Option<Row> {
+        let h = match side {
+            Side::Old => self.old.as_ref()?,
+            Side::New => self.new.as_ref()?,
+        };
+        let (no, spans, emphasis, cr) = (h.no, h.spans.clone(), h.emphasis.clone(), h.cr);
+        Some(match (self.changed, side) {
+            (false, _) => Row::Context { old_no: no, new_no: no, spans },
+            (true, Side::Old) => Row::Deletion { old_no: no, spans, emphasis, cr },
+            (true, Side::New) => Row::Insertion { new_no: no, spans, emphasis, cr },
+        })
+    }
 }
 
 /// One screen row of the diff pane: a unified row, or a split pair.
@@ -73,6 +92,16 @@ impl Visible {
     #[must_use]
     pub fn fold_anchor(&self) -> Option<u32> {
         self.row().and_then(Row::fold_anchor)
+    }
+
+    /// The text a copy reads here: a content row's, or a split row's half on `side`; a fold or
+    /// a blank half reads none.
+    #[must_use]
+    pub fn content_text(&self, side: Option<Side>) -> Option<String> {
+        match self {
+            Visible::Row(row) => row.is_content().then(|| row.text()),
+            Visible::Pair(p) => side.and_then(|s| p.half(s)).map(|r| r.text()),
+        }
     }
 }
 

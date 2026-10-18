@@ -1978,8 +1978,8 @@ fn handle_text_down(app: &mut App, m: MouseEvent, area: Rect) -> bool {
         app.gesture =
             Gesture::Text { drag: TextDrag { surface, anchor: point, extent: point }, count };
     };
-    if file_tab && let Some(point) = ui::read_point_at(area, app, m.column, m.row) {
-        arm(app, Surface::Read, point);
+    if file_tab && let Some((side, point)) = ui::read_point_at(area, app, m.column, m.row) {
+        arm(app, Surface::Read { side }, point);
         return true;
     }
     if file_tab && let Some((comment, point)) = ui::card_point_at(area, app, m.column, m.row) {
@@ -2032,7 +2032,7 @@ fn text_drag_edge_scroll(app: &mut App, m: MouseEvent, area: Rect) {
     use crate::selection::Surface;
     let Some(drag) = app.text_drag() else { return };
     match drag.surface {
-        Surface::Read => read_edge_scroll(app, m, area, true),
+        Surface::Read { .. } => read_edge_scroll(app, m, area, true),
         // Card text ignores h-scroll (TS-ONE-SURFACE).
         Surface::Card { .. } => read_edge_scroll(app, m, area, false),
         Surface::Files => {
@@ -2065,7 +2065,7 @@ fn text_drag_set_extent(app: &mut App, m: MouseEvent, area: Rect) {
     use crate::selection::{Point, Surface};
     let Some(drag) = app.text_drag() else { return };
     let extent = match drag.surface {
-        Surface::Read => ui::read_point_clamped(area, app, m.column, m.row),
+        Surface::Read { side } => ui::read_point_clamped(area, app, side, m.column, m.row),
         Surface::Card { comment } => ui::card_point_clamped(area, app, comment, m.column, m.row),
         Surface::Painted => ui::painted_point(area, app, m.column, m.row, true),
         Surface::Files => {
@@ -2139,13 +2139,13 @@ fn finish_text_drag(
                 }
             }
             // A double copies the word; a wordless cell clicks.
-            Surface::Read | Surface::Painted | Surface::Card { .. } if count == 2 => {
+            Surface::Read { .. } | Surface::Painted | Surface::Card { .. } if count == 2 => {
                 if !word_click_copy(app, area, drag, target) && clicks_act {
                     perform_click(app, m, area, heights, drag)?;
                 }
             }
             // A triple copies the source line; an empty line clicks.
-            Surface::Read | Surface::Painted | Surface::Card { .. } if count >= 3 => {
+            Surface::Read { .. } | Surface::Painted | Surface::Card { .. } if count >= 3 => {
                 if !line_click_copy(app, area, drag, target) && clicks_act {
                     perform_click(app, m, area, heights, drag)?;
                 }
@@ -2268,7 +2268,7 @@ fn surface_text(
 ) -> Option<String> {
     use crate::selection::{Surface, lines_text};
     match surface {
-        Surface::Read => Some(crate::selection::read_text(&app.visible, a, b)),
+        Surface::Read { side } => Some(crate::selection::read_text(&app.visible, side, a, b)),
         Surface::Files => {
             Some(crate::selection::files_text(&app.file_rows, &app.entries, a.row, b.row))
         }
@@ -2306,7 +2306,7 @@ fn perform_click(
                 app.pr_select(i);
             }
         }
-        Surface::Read | Surface::Painted | Surface::Card { .. } => {
+        Surface::Read { .. } | Surface::Painted | Surface::Card { .. } => {
             if let Some(url) = app.painted_link_at(m.column, m.row) {
                 app.focus = Focus::Diff;
                 app.open_link(&url);
@@ -2583,7 +2583,7 @@ fn dispatch_mouse(
         MouseEventKind::Drag(MouseButton::Left) if app.gutter_drag() => {
             // A gutter drag selects rows, so it never scrolls horizontally.
             read_edge_scroll(app, m, area, false);
-            if let Some(p) = ui::read_point_clamped(area, app, m.column, m.row) {
+            if let Some(p) = ui::read_point_clamped(area, app, None, m.column, m.row) {
                 app.drag_select_to(p.row);
             }
         }
@@ -2611,7 +2611,7 @@ fn dispatch_mouse(
                 ui::refresh_read_layout(app, area);
             }
             if app.gutter_drag() {
-                if let Some(p) = ui::read_point_clamped(area, app, m.column, m.row) {
+                if let Some(p) = ui::read_point_clamped(area, app, None, m.column, m.row) {
                     app.drag_select_to(p.row);
                 }
             } else {
@@ -2734,7 +2734,7 @@ mod refresh_tests {
         use crate::selection::{Gesture, Point, Surface, TextDrag};
         let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
         let drag = TextDrag {
-            surface: Surface::Read,
+            surface: Surface::Read { side: None },
             anchor: Point { row: 0, chr: 0 },
             extent: Point { row: 0, chr: 4 },
         };
@@ -3512,7 +3512,7 @@ mod refresh_tests {
         // A pristine press, so the completion copies nothing and no clipboard runs.
         let press = Gesture::Text {
             drag: TextDrag {
-                surface: Surface::Read,
+                surface: Surface::Read { side: None },
                 anchor: Point { row: 0, chr: 0 },
                 extent: Point { row: 0, chr: 0 },
             },

@@ -1293,10 +1293,8 @@ impl App {
     /// The text of the read-pane row the multi-click chain targets.
     fn clicked_target_text(&self) -> Option<String> {
         let click = self.last_click?;
-        if click.surface != crate::selection::Surface::Read {
-            return None;
-        }
-        Some(self.visible.get(click.target)?.row()?.text())
+        let crate::selection::Surface::Read { side } = click.surface else { return None };
+        self.visible.get(click.target)?.content_text(side)
     }
 
     /// Reload the open view; only a different file resets it and drops an armed crossing.
@@ -1522,10 +1520,10 @@ impl App {
             self.last_click = None;
         }
         if let Some((d, copied)) = &self.settled_sel
-            && d.surface == crate::selection::Surface::Read
+            && let crate::selection::Surface::Read { side } = d.surface
         {
             let (a, b) = d.ordered();
-            if crate::selection::read_text(&self.visible, a, b) != *copied {
+            if crate::selection::read_text(&self.visible, side, a, b) != *copied {
                 self.settled_sel = None;
             }
         }
@@ -1534,13 +1532,13 @@ impl App {
     /// Drop the read pane's marks; navigator marks stay.
     fn drop_read_marks(&mut self) {
         use crate::selection::Surface;
-        if self.last_click.is_some_and(|c| c.surface == Surface::Read) {
+        if self.last_click.is_some_and(|c| matches!(c.surface, Surface::Read { .. })) {
             self.last_click = None;
         }
         if self
             .settled_sel
             .as_ref()
-            .is_some_and(|(d, _)| matches!(d.surface, Surface::Read | Surface::Card { .. }))
+            .is_some_and(|(d, _)| matches!(d.surface, Surface::Read { .. } | Surface::Card { .. }))
         {
             self.settled_sel = None;
         }
@@ -3269,7 +3267,7 @@ impl App {
         use crate::selection::Surface;
         matches!(self.gesture, crate::selection::Gesture::Gutter)
             || self.text_drag().is_some_and(|d| match d.surface {
-                Surface::Read | Surface::Card { .. } => true,
+                Surface::Read { .. } | Surface::Card { .. } => true,
                 // The `PR` read pane holds through the gated PR drains instead.
                 Surface::Painted | Surface::Files | Surface::PrNav => false,
             })
@@ -3282,7 +3280,9 @@ impl App {
         // Exhaustive, so a new surface must choose its freeze.
         self.text_drag().is_some_and(|d| match d.surface {
             Surface::Files => true,
-            Surface::Read | Surface::Card { .. } | Surface::Painted | Surface::PrNav => false,
+            Surface::Read { .. } | Surface::Card { .. } | Surface::Painted | Surface::PrNav => {
+                false
+            }
         })
     }
 
@@ -3293,7 +3293,7 @@ impl App {
         self.text_drag().is_some_and(|d| match d.surface {
             Surface::PrNav => true,
             Surface::Painted => self.tab == Tab::Pr,
-            Surface::Read | Surface::Card { .. } | Surface::Files => false,
+            Surface::Read { .. } | Surface::Card { .. } | Surface::Files => false,
         })
     }
 
@@ -3803,6 +3803,9 @@ impl App {
         if self.rendered.on_screen() {
             return anchor(&self.rendered_anchor_rows());
         }
+        if self.split_on_screen() {
+            return anchor(&self.split_anchor_rows());
+        }
         let (lo, hi) = self.selection_range();
         let rows: Vec<Row> =
             self.visible.get(lo..=hi)?.iter().filter_map(Visible::row).cloned().collect();
@@ -3839,6 +3842,22 @@ impl App {
                 within || owned()
             })
             .map(|(_, row)| row.clone())
+            .collect()
+    }
+
+    /// The unified rows a split selection's lines name, in unified order.
+    /// A comment on them equals the unified comment on the same lines.
+    fn split_anchor_rows(&self) -> Vec<Row> {
+        let (lo, hi) = self.selection_range();
+        let picked = self.visible.get(lo..=hi).unwrap_or(&[]);
+        let olds: HashSet<u32> = picked.iter().filter_map(Visible::old_no).collect();
+        let news: HashSet<u32> = picked.iter().filter_map(Visible::new_no).collect();
+        diff_lines(&self.diff.rows)
+            .filter(|row| {
+                row.old_no().is_some_and(|n| olds.contains(&n))
+                    || row.new_no().is_some_and(|n| news.contains(&n))
+            })
+            .cloned()
             .collect()
     }
 
@@ -3921,8 +3940,15 @@ impl App {
             .filter(|(_, c)| c.file == file && self.comment_in_view(c))
             .collect();
         if !self.rendered_active() {
+            let split = self.split_on_screen();
             let rows = |c: &Comment| -> Vec<usize> {
-                (0..self.visible.len()).filter(|&i| line_in(c, &self.visible[i])).collect()
+                let hit: Vec<usize> =
+                    (0..self.visible.len()).filter(|&i| line_in(c, &self.visible[i])).collect();
+                // A split comment spans its lines' rows, fill rows between them included.
+                match (split, hit.first(), hit.last()) {
+                    (true, Some(&first), Some(&last)) => (first..=last).collect(),
+                    _ => hit,
+                }
             };
             return shown.into_iter().map(|(ci, c)| (ci, rows(c))).collect();
         }
@@ -4264,7 +4290,7 @@ impl App {
     fn find_hits(&self, query: &str) -> (Vec<FindHit>, usize, bool) {
         let cs = find_case_sensitive(query);
         // A row's own text: a rendered row's never carries a marker's or a note's words.
-        let is_hit = |row: &Row| !find_match_ranges(&row.text(), query, cs).is_empty();
+        let is_hit = |text: &str| !find_match_ranges(text, query, cs).is_empty();
         let mut hits = Vec::new();
         let mut cursor_rank = 0usize;
         let mut on_match = false;
@@ -4273,14 +4299,20 @@ impl App {
             if here {
                 cursor_rank = hits.len();
             }
-            let Some(row) = row.row() else { continue };
-            if let Row::Fold { lines } = row {
-                // Folded lines are context, so each has a new-side number.
-                let folded = lines.iter().filter(|l| is_hit(l)).filter_map(Row::new_no);
-                hits.extend(folded.map(|new_no| FindHit::Folded { new_no }));
-                continue;
-            }
-            let m = is_hit(row);
+            let m = match row {
+                Visible::Row(Row::Fold { lines }) => {
+                    // Folded lines are context, so each has a new-side number.
+                    let folded = lines.iter().filter(|l| is_hit(&l.text())).filter_map(Row::new_no);
+                    hits.extend(folded.map(|new_no| FindHit::Folded { new_no }));
+                    continue;
+                }
+                Visible::Row(row) => is_hit(&row.text()),
+                // A split row is one hit, matching on either half.
+                Visible::Pair(_) => [Side::Old, Side::New]
+                    .into_iter()
+                    .filter_map(|side| row.content_text(Some(side)))
+                    .any(|text| is_hit(&text)),
+            };
             if here {
                 on_match = m;
             }

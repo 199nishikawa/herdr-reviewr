@@ -3887,7 +3887,7 @@ fn the_text_selection_highlights_the_dragged_span() {
     // `beta` on row 0 through char 1 (`本`) of row 2: a three-row stream selection.
     app.gesture = herdr_reviewr::selection::Gesture::Text {
         drag: TextDrag {
-            surface: Surface::Read,
+            surface: Surface::Read { side: None },
             anchor: Point { row: 0, chr: 6 },
             extent: Point { row: 2, chr: 1 },
         },
@@ -5127,4 +5127,61 @@ fn the_split_key_shows_where_it_acts_and_names_its_destination() {
 
     let out = dump(&split_frame(&mut app, 96));
     assert!(!out.contains("| split") && !out.contains("| unified"), "too narrow, `|` hides");
+}
+
+#[test]
+fn a_split_text_selection_paints_only_its_column() {
+    use herdr_reviewr::model::Side;
+    use herdr_reviewr::selection::{Point, Surface, TextDrag};
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Files;
+    split_frame(&mut app, 142);
+    let row = app.visible.iter().position(|v| v.new_no() == Some(3)).unwrap();
+    app.gesture = herdr_reviewr::selection::Gesture::Text {
+        drag: TextDrag {
+            surface: Surface::Read { side: Some(Side::New) },
+            anchor: Point { row, chr: 0 },
+            extent: Point { row, chr: 8 },
+        },
+        count: 1,
+    };
+    let buf = split_frame(&mut app, 142);
+    let y = dump(&buf).lines().position(|l| l.contains("TWO;")).unwrap() as u16;
+    let sel_bg = app.palette().fill(Fill::Selection);
+    let selected = |xs: std::ops::Range<u16>| {
+        xs.filter(|&x| buf.cell((x, y)).unwrap().style().bg == Some(sel_bg)).count()
+    };
+    assert_eq!(selected(71..141), 9, "`let total` in the new column");
+    assert_eq!(selected(1..70), 0, "nothing in the old column");
+}
+
+#[test]
+fn find_highlights_a_match_in_the_half_that_holds_it() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Files;
+    app.open_find();
+    for ch in "two;".chars() {
+        app.input_push(ch);
+    }
+    let buf = split_frame(&mut app, 142);
+    let y = dump(&buf).lines().position(|l| l.contains("TWO;")).unwrap() as u16;
+    let fill = app.palette().fill(Fill::Highlight);
+    let lit =
+        |xs: std::ops::Range<u16>| xs.filter(|&x| buf.cell((x, y)).unwrap().bg == fill).count();
+    assert_eq!(lit(1..70), 4, "`two;` lights in the old half");
+    assert_eq!(lit(71..141), 4, "and, ignoring case, `TWO;` in the new");
+
+    app.close_find();
+    app.open_find();
+    for ch in "Two".chars() {
+        app.input_push(ch);
+    }
+    let buf = split_frame(&mut app, 142);
+    let lit =
+        |xs: std::ops::Range<u16>| xs.filter(|&x| buf.cell((x, y)).unwrap().bg == fill).count();
+    assert_eq!(lit(1..141), 0, "a cased query matches neither half");
 }
