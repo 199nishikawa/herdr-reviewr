@@ -10472,3 +10472,138 @@ fn the_line_field_closes_when_its_file_or_tab_changes() {
     app.set_tab(Tab::Pr).unwrap();
     assert_eq!(app.mode, Mode::Normal, "the PR tab closes find");
 }
+
+/// A change where line 2 is rewritten and line 5 is added.
+fn split_flow_repo() -> Repo {
+    let r = Repo::init();
+    r.write("a.rs", "a\nb\nc\nd\n");
+    r.commit_all("init");
+    r.write("a.rs", "a\nX\nc\nd\nE\n");
+    r
+}
+
+/// The cursor row's old and new line numbers.
+fn cursor_lines(app: &App) -> (Option<u32>, Option<u32>) {
+    let v = &app.visible[app.diff_cursor];
+    (v.old_no(), v.new_no())
+}
+
+fn cursor_to(app: &mut App, lines: (Option<u32>, Option<u32>)) {
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|v| (v.old_no(), v.new_no()) == lines).unwrap();
+}
+
+#[test]
+fn split_and_back_keeps_the_cursor_on_its_line() {
+    let keymap = Keymap::default();
+    for start in [(Some(2), None), (None, Some(2))] {
+        let r = split_flow_repo();
+        let mut app = app_on(&r);
+        app.sync_split_width(140);
+        cursor_to(&mut app, start);
+
+        press(&mut app, &keymap, KeyCode::Char('|'));
+        assert!(app.split_on_screen());
+        assert_eq!(cursor_lines(&app), (Some(2), Some(2)), "both halves of line 2 share a row");
+
+        press(&mut app, &keymap, KeyCode::Char('|'));
+        assert!(!app.split_on_screen());
+        assert_eq!(cursor_lines(&app), start, "back on the side it left from");
+    }
+}
+
+#[test]
+fn a_width_flip_and_back_keeps_the_cursor_on_its_line() {
+    let r = split_flow_repo();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(90);
+    assert!(!app.split_on_screen(), "a narrow pane shows unified");
+    cursor_to(&mut app, (Some(2), None));
+
+    app.sync_split_width(140);
+    assert!(app.split_on_screen());
+    assert_eq!(cursor_lines(&app), (Some(2), Some(2)));
+
+    app.sync_split_width(90);
+    assert_eq!(cursor_lines(&app), (Some(2), None), "narrowed back, on the deletion it left");
+}
+
+#[test]
+fn rendered_from_a_split_row_lands_on_its_new_lines_block() {
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\nold para\n\nkeep\n");
+    r.commit_all("init");
+    r.write("doc.md", "# T\n\nnew para\n\nkeep\n");
+    let keymap = Keymap::default();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    assert!(app.split_on_screen());
+    cursor_to(&mut app, (Some(3), Some(3)));
+
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.rendered_active());
+    let row = app.visible[app.diff_cursor].row();
+    assert!(
+        matches!(row, Some(&Row::Rendered { src, src_end, .. }) if src <= 3 && 3 <= src_end),
+        "{row:?}"
+    );
+}
+
+#[test]
+fn split_clears_a_selection_and_a_selection_holds_the_layout() {
+    let keymap = Keymap::default();
+    let r = split_flow_repo();
+    let mut app = app_on(&r);
+    app.sync_split_width(140);
+    cursor_to(&mut app, (None, Some(5)));
+    app.toggle_select();
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert!(app.split_on_screen());
+    assert_eq!(app.select_anchor, None, "`|` drops the selection");
+
+    app.toggle_select();
+    app.sync_split_width(90);
+    assert!(app.split_on_screen(), "a width flip waits while rows are selected");
+    app.clear_selection();
+    app.sync_split_width(90);
+    assert!(!app.split_on_screen(), "and lands once the selection closes");
+}
+
+#[test]
+fn the_split_key_changes_nothing_where_split_cannot_show() {
+    let keymap = Keymap::default();
+    let r = split_flow_repo();
+    let mut app = app_on(&r);
+    app.sync_split_width(96);
+    let before = app.visible.clone();
+    press(&mut app, &keymap, KeyCode::Char('|'));
+    assert_eq!(app.visible, before);
+    app.sync_split_width(140);
+    assert!(!app.split_on_screen(), "the inert `|` never took the choice");
+}
+
+#[test]
+fn a_width_change_on_all_files_applies_on_the_way_back() {
+    let r = split_flow_repo();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    assert!(app.split_on_screen());
+    enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
+    app.sync_split_width(90);
+    enter_tab(&mut app, herdr_reviewr::app::Tab::Changes);
+    app.sync_split_width(90); // the first frame back
+    assert!(!app.split_on_screen(), "the narrower pane shows on the first frame back");
+}
+
+#[test]
+fn diff_view_split_opens_split_and_a_reread_never_flips_it() {
+    let r = split_flow_repo();
+    let mut app = common::app_on_split(&r);
+    app.sync_split_width(140);
+    assert!(app.split_on_screen(), "diff_view = split opens a wide diff split");
+
+    app.set_plugin_config(herdr_reviewr::config::PluginConfig::default());
+    app.reload().unwrap();
+    app.sync_split_width(140);
+    assert!(app.split_on_screen(), "a reread never flips a running pane");
+}

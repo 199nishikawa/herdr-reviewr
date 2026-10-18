@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Repo, app_on, app_on_rendered, enter_tab};
+use common::{Repo, app_on, app_on_rendered, app_on_split, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::diff::{Bar, MarkerKind};
@@ -4929,4 +4929,202 @@ fn the_line_field_paints_its_number_count_and_footer() {
     // The digits are a line, not a search: `row 1337` lights no match.
     let hl = app.palette().fill(Fill::Highlight);
     assert!(!render_buffer(&app).content.iter().any(|c| c.bg == hl), "no find highlight");
+}
+
+/// One frame at `width` with the navigator hidden, as the event loop draws it: width syncs first.
+fn split_frame(app: &mut App, width: u16) -> Buffer {
+    let area = Rect::new(0, 0, width, 20);
+    app.sync_split_width(ui::diff_inner_width(area, app));
+    render_size(app, width, 20)
+}
+
+/// The rows of a frame painting `old` and `new` side by side.
+fn side_by_side(out: &str, old: &str, new: &str) -> usize {
+    out.lines().filter(|l| l.contains(old) && l.contains(new)).count()
+}
+
+/// A frame row's halves, either side of the divider of a 142-column frame's read pane.
+fn halves(line: &str) -> (String, String) {
+    let chars: Vec<char> = line.chars().collect();
+    (chars[1..70].iter().collect(), chars[71..141].iter().collect())
+}
+
+/// One file with an insertion above a change between two unchanged lines.
+fn split_repo() -> Repo {
+    let r = Repo::init();
+    r.write("a.rs", "one\nlet total = two;\nthree\n");
+    r.commit_all("init");
+    r.write("a.rs", "zero\none\nlet total = TWO;\nthree\n");
+    r
+}
+
+#[test]
+fn split_shows_only_where_it_fits_and_keeps_the_choice() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+
+    let out = dump(&split_frame(&mut app, 142));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "142 columns show old beside new: {out}");
+
+    let out = dump(&split_frame(&mut app, 96));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 0, "96 columns show unified: {out}");
+    assert!(out.contains("two;") && out.contains("TWO;"));
+
+    let out = dump(&split_frame(&mut app, 142));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "the choice outlives a narrow spell");
+}
+
+#[test]
+fn hiding_the_navigator_shows_split_on_the_next_frame() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    let out = dump(&split_frame(&mut app, 142));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 0, "beside the navigator the pane is narrow");
+
+    app.toggle_navigator_hidden();
+    let out = dump(&split_frame(&mut app, 142));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "the first frame after `z` shows split");
+}
+
+#[test]
+fn one_sided_files_rendered_markdown_and_all_files_show_unified() {
+    let r = Repo::init();
+    r.write("doc.md", "# Title\n\nold body\n");
+    r.write("gone.rs", "fn gone() {}\n");
+    r.commit_all("init");
+    r.write("added.rs", "fn added() {}\n");
+    r.write("doc.md", "# Title\n\nnew body\n");
+    r.write("gone.rs", "");
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        split_frame(&mut app, 142);
+        let path = app.diff_path.clone().unwrap();
+        // Markdown shows source until `m`, so it splits like any diff.
+        assert_eq!(app.split_on_screen(), path == "doc.md", "{path}");
+        seen.push(path);
+        app.focus = Focus::Files;
+        app.move_cursor(1).unwrap();
+    }
+    seen.sort();
+    assert_eq!(seen, ["added.rs", "doc.md", "gone.rs"]);
+
+    app.file_cursor = 0;
+    app.move_cursor(1).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+    app.focus = Focus::Diff;
+    app.toggle_rendered();
+    split_frame(&mut app, 142);
+    assert!(!app.split_on_screen(), "rendered markdown never splits");
+    app.toggle_rendered();
+    split_frame(&mut app, 142);
+    assert!(app.split_on_screen(), "back to source, it splits again");
+
+    enter_tab(&mut app, Tab::AllFiles);
+    split_frame(&mut app, 142);
+    assert!(!app.split_on_screen(), "All files shows content, never split");
+}
+
+#[test]
+fn a_file_growing_past_999_lines_keeps_split() {
+    let lines = |n: usize, mid: &str| -> String {
+        (1..=n).map(|i| if i == 500 { format!("{mid}\n") } else { format!("line {i}\n") }).collect()
+    };
+    let r = Repo::init();
+    r.write("big.txt", &lines(998, "middle old"));
+    r.commit_all("init");
+    r.write("big.txt", &lines(998, "middle new"));
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    split_frame(&mut app, 142);
+    assert!(app.split_on_screen());
+
+    r.write("big.txt", &lines(1010, "middle new"));
+    app.reload().unwrap();
+    split_frame(&mut app, 142);
+    assert!(app.split_on_screen(), "a four-digit gutter fits the same width");
+}
+
+#[test]
+fn each_half_paints_its_own_side() {
+    const EMPH_INS_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x30, 0x55, 0x3f);
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Files; // no diff cursor, so the emphasis bg shows
+    let buf = split_frame(&mut app, 142);
+    let out = dump(&buf);
+    let row = |text: &str| out.lines().position(|l| l.contains(text)).unwrap();
+
+    let (left, right) = halves(out.lines().nth(row("zero")).unwrap());
+    assert!(left.trim().is_empty(), "an insertion leaves the old half blank: {left:?}");
+    assert!(right.contains(" 1 zero"), "{right:?}");
+
+    let (left, right) = halves(out.lines().nth(row("one")).unwrap());
+    assert!(left.contains(" 1 one") && right.contains(" 2 one"), "{left:?} | {right:?}");
+
+    let y = row("TWO;");
+    let (left, right) = halves(out.lines().nth(y).unwrap());
+    assert!(left.contains(" 2 let total = two;"), "{left:?}");
+    assert!(right.contains(" 3 let total = TWO;"), "{right:?}");
+    let emphasized = |xs: std::ops::Range<u16>, glyph: &str| {
+        xs.into_iter().any(|x| {
+            buf.cell((x, y as u16)).is_some_and(|c| c.symbol() == glyph && c.bg == EMPH_INS_BG)
+        })
+    };
+    assert!(emphasized(71..141, "T"), "the new half emphasizes its changed word");
+    assert!(!emphasized(1..70, "t"), "the old half never takes the insertion's emphasis");
+}
+
+#[test]
+fn the_cursor_fill_crosses_a_blank_half() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Diff;
+    split_frame(&mut app, 142);
+    app.diff_cursor = app.visible.iter().position(|v| v.new_no() == Some(1)).unwrap();
+    let buf = split_frame(&mut app, 142);
+    let y = dump(&buf).lines().position(|l| l.contains("zero")).unwrap() as u16;
+    let filled =
+        (1..70u16).filter(|&x| buf.cell((x, y)).is_some_and(|c| c.bg == CURSOR_BG)).count();
+    assert!(filled > 60, "the blank old half takes the cursor fill: {filled}");
+}
+
+#[test]
+fn a_split_row_wraps_as_tall_as_its_taller_half() {
+    let r = Repo::init();
+    r.write("w.rs", "short\nkeep\n");
+    r.commit_all("init");
+    r.write("w.rs", &format!("{}\nkeep\n", "long ".repeat(30)));
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    let gap = |app: &mut App| {
+        let out = dump(&split_frame(app, 142));
+        let row = |text: &str| out.lines().position(|l| l.contains(text)).unwrap();
+        row("keep") - row("short")
+    };
+    app.wrap = true;
+    assert!(gap(&mut app) >= 3, "the long new half wraps, and its old half pads beside it");
+    app.wrap = false;
+    assert_eq!(gap(&mut app), 1, "unwrapped, every row is one line");
+}
+
+#[test]
+fn the_split_key_shows_where_it_acts_and_names_its_destination() {
+    let r = split_repo();
+    let mut app = app_on(&r);
+    app.toggle_navigator_hidden();
+    app.toggle_keys();
+    let out = dump(&split_frame(&mut app, 142));
+    assert!(out.contains("| split"), "{out}");
+
+    app.toggle_split();
+    let out = dump(&split_frame(&mut app, 142));
+    assert!(out.contains("| unified"), "the label names the destination: {out}");
+
+    let out = dump(&split_frame(&mut app, 96));
+    assert!(!out.contains("| split") && !out.contains("| unified"), "too narrow, `|` hides");
 }

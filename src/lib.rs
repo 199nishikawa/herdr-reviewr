@@ -969,6 +969,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             };
             // Rewrap rendered markdown before the heights measure it.
             app.sync_rendered_width(ui::rendered_width(area, app));
+            app.sync_split_width(ui::diff_inner_width(area, app));
             let heights = ui::diff_row_heights(app, area);
             app.settle_diff_scroll(&heights, effective);
             let file_vp = ui::file_viewport_height(area, app);
@@ -1917,6 +1918,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::PrevFile => app.prev_file(),
             K::Wrap => app.toggle_wrap(),
             K::Rendered => app.toggle_rendered(),
+            K::Split => app.toggle_split(),
             K::NavigatorPosition => app.cycle_navigator_position(),
             K::NavigatorHide => app.toggle_navigator_hidden(),
             K::NavigatorGrow => app.resize_navigator(4),

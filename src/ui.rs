@@ -16,21 +16,17 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use crate::config::NavigatorPosition;
 use crate::diff::{FileDiff, MarkerKind, Notice, RenderedKind, Row};
-use crate::split::Visible;
-
-/// A painted row as unified; split rows paint from ticket 03 on, which deletes this.
-fn unified_row(v: &Visible) -> &Row {
-    v.row().expect("split rows don't paint yet")
-}
 use crate::file_list::RowKind;
 use crate::forge;
 use crate::git;
 use crate::herdr::AgentChoice;
 use crate::keymap::Keymap;
+use crate::model::Side;
 use crate::model::{ChangeKind, ChangedFile, Comment};
 use crate::roles::Palette;
 use crate::roles::{Fill, Ink};
 use crate::snippet::{snippet_caption_sign, snippet_row_is_comment};
+use crate::split::{Half, Pair, Visible};
 use std::fmt::Write as _;
 
 /// Paint one frame, and say when an age it painted next reads differently, at most a minute out:
@@ -346,7 +342,7 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let base = row_height(unified_row(r), gutter_w, width, app.wrap);
+            let base = visible_height(r, gutter_w, width, app.wrap);
             let card: usize = cards
                 .iter()
                 .filter(|&&(row, ci)| row == i && Some(ci) != editing)
@@ -398,7 +394,7 @@ fn read_layout(app: &App, inner: Rect, cards: &[(usize, usize)]) -> Vec<Slot> {
     let rows = app.visible.len();
     // Code lines, then card lines, in paint order.
     let row_slots = |i: usize| -> Vec<Slot> {
-        let segs = row_height(unified_row(&app.visible[i]), gutter_w, width, app.wrap);
+        let segs = visible_height(&app.visible[i], gutter_w, width, app.wrap);
         let mut out: Vec<Slot> = (0..segs).map(|seg| Slot::Code { row: i, seg }).collect();
         for &(_, ci) in cards.iter().filter(|&&(row, _)| row == i) {
             if Some(ci) != editing
@@ -494,7 +490,7 @@ pub fn widest_visible_row(app: &App, area: Rect) -> usize {
         .iter()
         .skip(app.diff_scroll)
         .take(content.height as usize)
-        .map(|r| plain_cells(unified_row(r)).iter().map(|c| c.w).sum())
+        .map(visible_code_width)
         .max()
         .unwrap_or(0)
 }
@@ -535,10 +531,7 @@ pub fn read_point_at(area: Rect, app: &App, col: u16, row: u16) -> Option<crate:
     let Slot::Code { row: li, seg } = *slots.get((row - pane.inner.y) as usize)? else {
         return None;
     };
-    let r = unified_row(&app.visible[li]);
-    if !r.is_content() {
-        return None;
-    }
+    let r = app.visible[li].row().filter(|r| r.is_content())?;
     let code_width = (pane.inner.width as usize).saturating_sub(pane.prefix_w).max(1);
     let col_in_code = (col as usize).saturating_sub(pane.inner.x as usize + pane.prefix_w);
     Some(crate::selection::Point {
@@ -568,11 +561,10 @@ pub fn read_point_clamped(
         .chain(at + 1..slots.len())
         .find(|&i| matches!(slots.get(i), Some(Slot::Code { .. })))?;
     let Slot::Code { row: li, seg } = slots[code] else { return None };
-    let r = unified_row(&app.visible[li]);
-    if !r.is_content() {
-        // A fold paints as one Code slot; snap its endpoint to the row's start.
+    // A fold paints as one Code slot; snap its endpoint to the row's start.
+    let Some(r) = app.visible[li].row().filter(|r| r.is_content()) else {
         return Some(crate::selection::Point { row: li, chr: 0 });
-    }
+    };
     let code_width = (pane.inner.width as usize).saturating_sub(pane.prefix_w).max(1);
     let col_in_code = (col as usize).saturating_sub(pane.inner.x as usize + pane.prefix_w);
     Some(crate::selection::Point {
@@ -648,10 +640,9 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
                 if li < lo.row || li > hi.row {
                     continue;
                 }
-                let row_ref = unified_row(&app.visible[li]);
-                if !row_ref.is_content() {
+                let Some(row_ref) = app.visible[li].row().filter(|r| r.is_content()) else {
                     continue;
-                }
+                };
                 let cells = plain_cells(row_ref);
                 let (seg_s, seg_e) = seg_cell_range(app, row_ref, &cells, seg, code_width);
                 let y = pane.inner.y + off as u16;
@@ -1844,8 +1835,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                         hovered: hovered_row == Some(row),
                         lead: app.is_rendered_lead(row),
                     };
-                    row_cache =
-                        Some((row, render_row(unified_row(&app.visible[row]), layout, state)));
+                    row_cache = Some((row, render_visible(&app.visible[row], layout, state)));
                 }
                 row_cache.as_ref().and_then(|(_, l)| l.get(seg).cloned()).unwrap_or_default()
             }
@@ -1910,7 +1900,7 @@ fn gutter_for(diff: &FileDiff) -> usize {
 }
 
 /// The gutter prefix width: the change bar plus the right-aligned line number and a space.
-fn gutter_prefix_width(gutter_w: usize) -> usize {
+const fn gutter_prefix_width(gutter_w: usize) -> usize {
     1 + gutter_w + 1
 }
 
@@ -1923,6 +1913,101 @@ fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
     let code_width = width.saturating_sub(gutter_prefix_width(gutter_w)).max(1);
     // The find highlight never changes wrapping, so height ignores it.
     wrap_segments(&plain_cells(row), code_width, ContinuationSpaces::Trim).len()
+}
+
+/// The narrowest read pane that shows split: 60 code columns a side beside a five-digit gutter
+/// (files cap at 50,000 lines), and the divider.
+pub const SPLIT_MIN_WIDTH: usize = 2 * (gutter_prefix_width(5) + 60) + 1;
+
+/// A split row's halves' widths: the divider's column between them.
+fn half_widths(width: usize) -> (usize, usize) {
+    let left = width.saturating_sub(1) / 2;
+    (left, width.saturating_sub(1 + left))
+}
+
+/// A half as the one-line row it paints: unchanged context, or a deletion or an insertion,
+/// numbered with its own side's line.
+fn half_row(h: &Half, side: Side, changed: bool) -> Row {
+    let spans = h.spans.clone();
+    let (emphasis, cr) = (h.emphasis.clone(), h.cr);
+    match (changed, side) {
+        (false, _) => Row::Context { old_no: h.no, new_no: h.no, spans },
+        (true, Side::Old) => Row::Deletion { old_no: h.no, spans, emphasis, cr },
+        (true, Side::New) => Row::Insertion { new_no: h.no, spans, emphasis, cr },
+    }
+}
+
+/// A pair's halves as rows, old then new; a blank half is `None`.
+fn pair_rows(p: &Pair) -> [Option<Row>; 2] {
+    [
+        p.old.as_ref().map(|h| half_row(h, Side::Old, p.changed)),
+        p.new.as_ref().map(|h| half_row(h, Side::New, p.changed)),
+    ]
+}
+
+/// A painted row's display height: a split row is as tall as its taller half.
+fn visible_height(v: &Visible, gutter_w: usize, width: usize, wrap: bool) -> usize {
+    match v {
+        Visible::Row(row) => row_height(row, gutter_w, width, wrap),
+        Visible::Pair(p) => {
+            let (l, r) = half_widths(width);
+            let [old, new] = pair_rows(p);
+            let height =
+                |row: Option<Row>, w: usize| row.map_or(0, |r| row_height(&r, gutter_w, w, wrap));
+            height(old, l).max(height(new, r)).max(1)
+        }
+    }
+}
+
+/// A painted row's widest code line, in cells.
+fn visible_code_width(v: &Visible) -> usize {
+    let cells = |row: &Row| -> usize { plain_cells(row).iter().map(|c| c.w).sum() };
+    match v {
+        Visible::Row(row) => cells(row),
+        Visible::Pair(p) => pair_rows(p).iter().flatten().map(cells).max().unwrap_or(0),
+    }
+}
+
+/// A painted row's display lines: a unified row, or a split row's halves beside a divider.
+fn render_visible(v: &Visible, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'static>> {
+    let p = match v {
+        Visible::Row(row) => return render_row(row, layout, state),
+        Visible::Pair(p) => p,
+    };
+    let (lw, rw) = half_widths(layout.width);
+    let half = |row: &Option<Row>, width: usize| {
+        row.as_ref().map(|r| render_row(r, RowLayout { width, ..layout }, state))
+    };
+    let [old, new] = pair_rows(p);
+    let (left, right) = (half(&old, lw), half(&new, rw));
+    let rows = left.as_ref().map_or(0, Vec::len).max(right.as_ref().map_or(0, Vec::len)).max(1);
+    // A blank half is the terminal's, unless the cursor or selection paints across it.
+    let on = row_fill(state.cursor, state.selected, layout.focused, Fill::Base);
+    let blank = |width: usize| fill(Line::from(" ".repeat(width)), layout.pal.bg(on));
+    let divider = Span::styled("│", Style::default().fg(layout.pal.mark(Ink::Border, on)));
+    let line_at = |lines: &Option<Vec<Line<'static>>>, k: usize, width: usize| {
+        lines.as_ref().and_then(|l| l.get(k).cloned()).unwrap_or_else(|| blank(width))
+    };
+    (0..rows)
+        .map(|k| {
+            let mut spans = line_spans(line_at(&left, k, lw));
+            spans.push(divider.clone());
+            spans.extend(line_spans(line_at(&right, k, rw)));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// A line's spans with the line's own style folded into each, so lines can sit side by side.
+fn line_spans(line: Line<'static>) -> Vec<Span<'static>> {
+    let base = line.style;
+    line.spans
+        .into_iter()
+        .map(|s| {
+            let style = base.patch(s.style);
+            s.style(style)
+        })
+        .collect()
 }
 
 /// The diff-pane layout: constant for a frame.
@@ -2733,6 +2818,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::GotoLine => (hint(K::GotoLine), "line"),
         A::LineGo => ("enter".into(), "go"),
         A::Wrap => (hint(K::Wrap), if app.wrap { "unwrap" } else { "wrap" }),
+        A::Split => (hint(K::Split), if app.split_on_screen() { "unified" } else { "split" }),
         // Arrows, since every printable is query text here.
         A::FindStep | A::MoveBaseRow | A::PickResult => ("↑↓".into(), "move"),
         A::FlipSearchMode => {

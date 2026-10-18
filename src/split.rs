@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::diff::{CharRange, FileDiff, Row, Span, change_blocks};
+use crate::diff::{CharRange, Row, Span, change_blocks};
 
 /// One side's line, as a split half paints it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -96,11 +96,11 @@ impl UnifiedRow for Visible {
     }
 }
 
-/// `diff`'s split rows: each change block's anchors face each other, the rest face by position.
+/// The split rows of a diff's `rows` (folds as they should show), given its `similar` pairs:
+/// each change block's anchors face each other, the rest face by position.
 #[must_use]
-pub fn split_rows(diff: &FileDiff) -> Vec<Visible> {
-    let similar: HashSet<(u32, u32)> = diff.similar.iter().copied().collect();
-    let rows = &diff.rows;
+pub fn split_rows(rows: &[Row], similar: &[(u32, u32)]) -> Vec<Visible> {
+    let similar: HashSet<(u32, u32)> = similar.iter().copied().collect();
     let mut out = Vec::with_capacity(rows.len());
     let mut i = 0;
     for (dels, inss) in change_blocks(rows) {
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn a_rewrite_faces_its_lines_by_position() {
         let d = build("keep\nalpha one\nbeta two\ngamma three\n", "keep\nzzz\nyyy\n");
-        let rows = split_rows(&d);
+        let rows = split_rows(&d.rows, &d.similar);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn a_similar_pair_faces_its_partner_past_an_inserted_line() {
         let d = build("let total = sum + 1;\n", "let fresh = 0;\nlet total = sum + 2;\n");
-        let rows = split_rows(&d);
+        let rows = split_rows(&d.rows, &d.similar);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
@@ -314,7 +314,7 @@ mod tests {
             "unique_line();\nlet total = sum + 2;\n",
         );
         assert_eq!(d.pairs.len(), 2, "pair_homologs crosses them: {:?}", d.pairs);
-        let rows = split_rows(&d);
+        let rows = split_rows(&d.rows, &d.similar);
         assert_each_line_once(&d, &rows);
         for v in &rows {
             let Visible::Pair(p) = v else { continue };
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn a_line_ending_change_faces_its_twin_with_the_cr_marker() {
         let d = build("a\r\nb\r\n", "a\nb\n");
-        let rows = split_rows(&d);
+        let rows = split_rows(&d.rows, &d.similar);
         assert_each_line_once(&d, &rows);
         assert_eq!(
             changed(&rows),
@@ -360,7 +360,7 @@ mod tests {
         }
         let d = build(&old, &new);
         assert!(d.pairs.len() > d.similar.len() + 100, "the block holds many twins");
-        let rows = split_rows(&d);
+        let rows = split_rows(&d.rows, &d.similar);
         assert_each_line_once(&d, &rows);
         // Non-unique twins never anchor, so no run of one-sided rows staggers the block.
         let mut one_sided = 0;

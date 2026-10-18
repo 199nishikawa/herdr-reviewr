@@ -28,6 +28,7 @@ pub enum Action {
     TabPr,
     Wrap,
     Rendered,
+    Split,
     NavigatorPosition,
     NavigatorHide,
     NavigatorGrow,
@@ -151,7 +152,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 44] = [
+const ACTIONS: [(Action, &str, &[Key]); 45] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -175,6 +176,7 @@ const ACTIONS: [(Action, &str, &[Key]); 44] = [
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Rendered, "rendered", &[Key::plain('m')]),
+    (Action::Split, "split", &[Key::plain('|')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),
     (Action::NavigatorHide, "navigator-hide", &[Key::plain('z')]),
     (Action::NavigatorGrow, "navigator-grow", &[Key::plain('<')]),
@@ -319,6 +321,7 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Comment));
         assert_eq!(keymap.action_for(Key::plain('S')), Some(Action::Send));
         assert_eq!(keymap.action_for(Key::plain('m')), Some(Action::Rendered));
+        assert_eq!(keymap.action_for(Key::plain('|')), Some(Action::Split));
         assert_eq!(keymap.action_for(Key::plain('p')), Some(Action::NavigatorPosition));
         assert_eq!(keymap.action_for(Key::plain('z')), Some(Action::NavigatorHide));
         assert_eq!(keymap.action_for(Key::plain('x')), None);
@@ -424,5 +427,9 @@ mod tests {
         // A chord collides like any other key, named in config syntax.
         let error = Keymap::resolve(&[(Action::Refresh, vec![Key::ctrl('f')])]).unwrap_err();
         assert!(error.contains("ctrl+f") && error.contains("`find`"), "{error}");
+
+        // A config that already bound `|` meets the new default and fails the same way.
+        let error = Keymap::resolve(&[(Action::Wrap, vec![Key::plain('|')])]).unwrap_err();
+        assert!(error.contains("`wrap`") && error.contains("`split`"), "{error}");
     }
 }
