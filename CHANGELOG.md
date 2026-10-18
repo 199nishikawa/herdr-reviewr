@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Windows install from PowerShell 7**: installing no longer fails at "verifying checksum" when herdr was started from pwsh 7.
+  Thanks [@v-senninha-v](https://github.com/v-senninha-v) ([#127](https://github.com/persiyanov/herdr-reviewr/issues/127)) and [@Yivas](https://github.com/Yivas) ([#142](https://github.com/persiyanov/herdr-reviewr/issues/142)).
+
 ## [0.46.0] — 2026-10-06
 
 ### Changed
