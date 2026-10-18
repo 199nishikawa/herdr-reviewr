@@ -28,6 +28,7 @@ the terminal.
 One persistent pane, pointed at a git worktree:
 
 - **Diff review** — the agent's changed files, syntax-highlighted.
+- **Split view** — old and new side by side with `|`, on a wide pane.
 - **Four diff scopes** — uncommitted, branch, last turn, commits.
 - **Last-turn diff** — what the worktree's latest turn changed, on its own.
 - **Line comments** — comment on a line or a range. Then send it to the agent.
@@ -133,6 +134,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `:` | Jump to a line number (`:0` first, `:$` last) |
 | `w` | Toggle line wrap |
 | `m` | Flip markdown between rendered and source |
+| `\|` | Flip the diff between unified and split (needs about 135 columns) |
 | `p` | Rotate navigator |
 | `z` | Hide / show navigator |
 | `<` `>` | Grow / shrink navigator |
@@ -230,6 +232,7 @@ The file accepts these keys:
 theme = "tokyo-night"
 default_scope = "branch"
 markdown_view = "rendered"
+diff_view = "split"
 navigator_position = "right"
 toggle_placement = "overlay"
 toggle_direction = "down"
@@ -272,6 +275,17 @@ start:
 
 ```toml
 markdown_view = "rendered"
+```
+
+### Diff view
+
+The diff opens unified. `|` flips it to split, with old on the left and new on the right. Every
+file you open in the pane follows until you press `|` again. Split needs about 135 columns, so
+hide the navigator (`z`), move it (`p`), or use a zoomed or overlay placement. A narrower pane
+shows unified and keeps your choice. `diff_view = "split"` starts a fresh pane in split:
+
+```toml
+diff_view = "split"
 ```
 
 ### Navigator position
@@ -363,6 +377,7 @@ The action names and their defaults:
 | `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
 | `wrap` | `w` |
 | `rendered` | `m` |
+| `split` | `\|` |
 | `navigator-position` | `p` |
 | `navigator-hide` | `z` |
 | `navigator-grow` / `navigator-shrink` | `<` / `>` |
@@ -541,7 +556,7 @@ herdr plugin link .
 
 ## Roadmap
 
-Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
+Structured (JSON) export, mark-file-reviewed,
 named-key notation for keybindings, OSC light/dark theme autodetect, more themes
 (`kanagawa`, `vesper`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
