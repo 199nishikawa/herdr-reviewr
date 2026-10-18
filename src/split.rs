@@ -29,6 +29,73 @@ pub enum Visible {
     Pair(Pair),
 }
 
+impl Visible {
+    /// The unified row; a split pair is none.
+    #[must_use]
+    pub fn row(&self) -> Option<&Row> {
+        match self {
+            Visible::Row(row) => Some(row),
+            Visible::Pair(_) => None,
+        }
+    }
+
+    /// The old-side line on this row, if any.
+    #[must_use]
+    pub fn old_no(&self) -> Option<u32> {
+        match self {
+            Visible::Row(row) => row.old_no(),
+            Visible::Pair(p) => p.old.as_ref().map(|h| h.no),
+        }
+    }
+
+    /// The new-side line on this row, if any.
+    #[must_use]
+    pub fn new_no(&self) -> Option<u32> {
+        match self {
+            Visible::Row(row) => row.new_no(),
+            Visible::Pair(p) => p.new.as_ref().map(|h| h.no),
+        }
+    }
+
+    /// Whether this row anchors a comment: every kind but a fold.
+    #[must_use]
+    pub fn is_content(&self) -> bool {
+        self.row().is_none_or(Row::is_content)
+    }
+
+    /// The hidden line count of a fold, else 0.
+    #[must_use]
+    pub fn hidden(&self) -> usize {
+        self.row().map_or(0, Row::hidden)
+    }
+
+    /// A fold's identity across rebuilds, else `None`.
+    #[must_use]
+    pub fn fold_anchor(&self) -> Option<u32> {
+        self.row().and_then(Row::fold_anchor)
+    }
+}
+
+/// A unified row's content, for tests that read unified rows; panics on a split pair.
+#[doc(hidden)]
+pub trait UnifiedRow {
+    fn unified(&self) -> &Row;
+
+    fn text(&self) -> String {
+        self.unified().text()
+    }
+
+    fn marker(&self) -> char {
+        self.unified().marker()
+    }
+}
+
+impl UnifiedRow for Visible {
+    fn unified(&self) -> &Row {
+        self.row().expect("a unified row")
+    }
+}
+
 /// `diff`'s split rows: each change block's anchors face each other, the rest face by position.
 #[must_use]
 pub fn split_rows(diff: &FileDiff) -> Vec<Visible> {
@@ -50,7 +117,11 @@ fn unchanged(row: &Row) -> Visible {
     match row {
         Row::Context { old_no, new_no, spans } => {
             let half = |no: u32| Half { no, spans: spans.clone(), emphasis: Vec::new(), cr: false };
-            Visible::Pair(Pair { old: Some(half(*old_no)), new: Some(half(*new_no)), changed: false })
+            Visible::Pair(Pair {
+                old: Some(half(*old_no)),
+                new: Some(half(*new_no)),
+                changed: false,
+            })
         }
         _ => Visible::Row(row.clone()),
     }
@@ -109,7 +180,9 @@ fn anchors(dels: &[Row], inss: &[Row], similar: &HashSet<(u32, u32)>) -> Vec<(us
             found.push((k, new_at[old[k].as_str()]));
         }
         let Some(o) = d.old_no() else { continue };
-        found.extend(similar.iter().filter(|p| p.0 == o).filter_map(|p| Some((k, *ins_at.get(&p.1)?))));
+        found.extend(
+            similar.iter().filter(|p| p.0 == o).filter_map(|p| Some((k, *ins_at.get(&p.1)?))),
+        );
     }
     // Within one deletion, larger insertions first, so the increasing run keeps at most one.
     found.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
@@ -174,7 +247,9 @@ mod tests {
     fn assert_each_line_once(diff: &FileDiff, rows: &[Visible]) {
         let mut want: (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
         for row in &diff.rows {
-            for line in if let Row::Fold { lines } = row { lines.clone() } else { vec![row.clone()] } {
+            for line in
+                if let Row::Fold { lines } = row { lines.clone() } else { vec![row.clone()] }
+            {
                 want.0.extend(line.old_no());
                 want.1.extend(line.new_no());
             }
@@ -225,13 +300,19 @@ mod tests {
             ]
         );
         let Visible::Pair(p) = &rows[1] else { panic!() };
-        assert!(!p.new.as_ref().unwrap().emphasis.is_empty(), "a facing similar pair keeps emphasis");
+        assert!(
+            !p.new.as_ref().unwrap().emphasis.is_empty(),
+            "a facing similar pair keeps emphasis"
+        );
     }
 
     #[test]
     fn a_crossing_twin_never_crosses_and_a_dropped_pair_loses_emphasis() {
         // The ending change keeps the twin inside the block, where it crosses the similar pair.
-        let d = build("let total = sum + 1;\nunique_line();\r\n", "unique_line();\nlet total = sum + 2;\n");
+        let d = build(
+            "let total = sum + 1;\nunique_line();\r\n",
+            "unique_line();\nlet total = sum + 2;\n",
+        );
         assert_eq!(d.pairs.len(), 2, "pair_homologs crosses them: {:?}", d.pairs);
         let rows = split_rows(&d);
         assert_each_line_once(&d, &rows);
@@ -241,7 +322,10 @@ mod tests {
             let faces_partner = old.as_deref() == Some("let total = sum + 1;")
                 && new.as_deref() == Some("let total = sum + 2;");
             let emphasized = p.old.iter().chain(&p.new).any(|h| !h.emphasis.is_empty());
-            assert_eq!(emphasized, faces_partner, "emphasis only where the similar pair faces: {p:?}");
+            assert_eq!(
+                emphasized, faces_partner,
+                "emphasis only where the similar pair faces: {p:?}"
+            );
         }
     }
 

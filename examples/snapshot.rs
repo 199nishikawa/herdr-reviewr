@@ -12,6 +12,7 @@ use herdr_reviewr::forge::{
 };
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
+use herdr_reviewr::split::UnifiedRow as _;
 use herdr_reviewr::theme::NAMES;
 use herdr_reviewr::{handle_key, handle_mouse, ui};
 use ratatui::Terminal;

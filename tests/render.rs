@@ -10,6 +10,7 @@ use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
 use herdr_reviewr::roles::{Fill, Ink};
+use herdr_reviewr::split::UnifiedRow as _;
 use herdr_reviewr::ui::{self, HeaderHit};
 use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::Terminal;

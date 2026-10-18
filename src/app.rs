@@ -18,6 +18,7 @@ use crate::marks::{MarkMap, Unit, diff_lines};
 use crate::model::{ChangeKind, ChangedFile, Comment, CommentStore, CommitPick, Rev, Scope, Side};
 use crate::rendered::{Built, Content, OldMap, RenderedIndex, RenderedInput, RenderedView, RowId};
 use crate::roles::Palette;
+use crate::split::Visible;
 use crate::theme;
 use crate::world::{Changeset, PickStatus, PickVerdict};
 
@@ -90,7 +91,7 @@ struct TabStash {
     file_scroll: usize,
     toggled_dirs: HashSet<String>,
     diff: FileDiff,
-    visible: Vec<Row>,
+    visible: Vec<Visible>,
     expanded_folds: HashSet<u32>,
     diff_path: Option<String>,
     diff_cursor: usize,
@@ -638,7 +639,7 @@ pub struct App {
     changeset: Changeset,
     pub diff: FileDiff,
     /// `diff.rows` with folds applied: what the cursor and hit tests index.
-    pub visible: Vec<Row>,
+    pub visible: Vec<Visible>,
     /// Fold anchors (first-hidden-line numbers) currently expanded; survives a refresh.
     expanded_folds: HashSet<u32>,
     /// The open diff's file, frozen with it while composing.
@@ -1282,7 +1283,7 @@ impl App {
         if click.surface != crate::selection::Surface::Read {
             return None;
         }
-        Some(self.visible.get(click.target)?.text())
+        Some(self.visible.get(click.target)?.row()?.text())
     }
 
     /// Reload the open view; only a different file resets it and drops an armed crossing.
@@ -1456,6 +1457,7 @@ impl App {
                     }
                     _ => vec![row.clone()],
                 })
+                .map(Visible::Row)
                 .collect();
         }
         // Across row kinds, the place crosses by source line.
@@ -1467,7 +1469,7 @@ impl App {
                 if rendered {
                     self.rendered.index.row_at_line(line)
                 } else {
-                    Some(line_row(&self.visible, line, Row::new_no))
+                    Some(line_row(&self.visible, line, Side::New))
                 }
             };
             if let Some(i) = to(cursor) {
@@ -1625,7 +1627,7 @@ impl App {
         // The place, re-expressed in the new content's line numbers.
         let place = showing.then(|| {
             let id = |i: usize| {
-                let id = self.visible.get(i).and_then(RowId::of)?;
+                let id = self.visible.get(i).and_then(Visible::row).and_then(RowId::of)?;
                 Some(edit.map_or(id, |m| id.map(|line| m.line(line))))
             };
             (id(self.diff_cursor), id(self.diff_scroll), self.select_anchor.map(id))
@@ -1660,7 +1662,7 @@ impl App {
         self.rendered.marks = marks;
         self.rendered.doc = doc;
         self.rendered.built = Some(Built { input, empty: false });
-        self.visible = rows;
+        self.visible = rows.into_iter().map(Visible::Row).collect();
         if let Some((cursor, scroll, anchor)) = place {
             let index = &self.rendered.index;
             // A live range's anchor reconciles by the same identity as the cursor.
@@ -1701,7 +1703,7 @@ impl App {
     /// Expand the fold under the cursor for good, growing toward the nearer viewport edge.
     pub fn expand_fold(&mut self, heights: &[usize], viewport: usize) {
         let fold_idx = self.diff_cursor;
-        let Some(anchor) = self.visible.get(fold_idx).and_then(Row::fold_anchor) else {
+        let Some(anchor) = self.visible.get(fold_idx).and_then(Visible::fold_anchor) else {
             return;
         };
         // Expanding replaces the 1 fold row with N context rows; rows below it shift by N-1.
@@ -2123,7 +2125,7 @@ impl App {
                 matches!(r, Row::Rendered { kind: RenderedKind::Block { line: l, .. }, .. }
                     if *l as usize == line)
             };
-            if let Some(row) = self.visible.iter().position(at) {
+            if let Some(row) = self.visible.iter().position(|v| v.row().is_some_and(at)) {
                 self.select_anchor = None;
                 self.diff_cursor = row;
                 self.diff_scroll = row;
@@ -2921,7 +2923,7 @@ impl App {
             let Ok((old, new)) = self.content_sides(&entry.path) else { continue };
             let source = self.rename_source(&entry.path);
             let diff = self.cache.get(entry.path, source, &old, &new, &self.highlighter);
-            if hunk_row(&diff.rows, None, forward).is_some() {
+            if diff.rows.iter().any(is_change) {
                 return Some(row);
             }
         }
@@ -3039,7 +3041,7 @@ impl App {
     /// Whether the focused diff cursor is on a fold, which `→` expands.
     pub fn on_fold(&self) -> bool {
         self.focus == Focus::Diff
-            && self.visible.get(self.diff_cursor).and_then(Row::fold_anchor).is_some()
+            && self.visible.get(self.diff_cursor).and_then(Visible::fold_anchor).is_some()
     }
 
     /// Expand the directory under the cursor (`→`); a no-op if it is a file or already open.
@@ -3381,7 +3383,7 @@ impl App {
             // The nearest worktree line number at or above the cursor, else the start.
             self.visible
                 .get(..=self.diff_cursor)
-                .and_then(|above| above.iter().rev().find_map(Row::new_no))
+                .and_then(|above| above.iter().rev().find_map(Visible::new_no))
                 .unwrap_or(1)
         };
         Some(EditTarget { path, line })
@@ -3696,7 +3698,7 @@ impl App {
             return self.selection_anchor().is_some();
         }
         let (lo, hi) = self.selection_range();
-        self.visible.get(lo..=hi).is_some_and(|s| s.iter().any(Row::is_content))
+        self.visible.get(lo..=hi).is_some_and(|s| s.iter().any(Visible::is_content))
     }
 
     /// The selection's `(side, start, end, snippet)`, rendered or not, by one `anchor()` (G1).
@@ -3705,7 +3707,9 @@ impl App {
             return anchor(&self.rendered_anchor_rows());
         }
         let (lo, hi) = self.selection_range();
-        anchor(self.visible.get(lo..=hi)?)
+        let rows: Vec<Row> =
+            self.visible.get(lo..=hi)?.iter().filter_map(Visible::row).cloned().collect();
+        anchor(&rows)
     }
 
     /// The source rows a rendered selection stands for: its new-side span, deletions, and owned changes.
@@ -3999,7 +4003,7 @@ impl App {
 
     /// Whether the foot band opens: a file tab with at least one content row, source or rendered.
     pub fn find_available(&self) -> bool {
-        self.tab.is_file_tab() && self.visible.iter().any(Row::is_content)
+        self.tab.is_file_tab() && self.visible.iter().any(Visible::is_content)
     }
 
     /// `ctrl+f`: open find as a fresh gesture, focusing the read pane.
@@ -4067,11 +4071,11 @@ impl App {
 
     /// Which side's numbers `:N` uses: the new side's, or the old side's in a file with no new
     /// lines (deleted or emptied).
-    fn line_side(&self) -> fn(&Row) -> Option<u32> {
-        if crate::marks::diff_lines(&self.visible).any(|r| r.new_no().is_some()) {
-            Row::new_no
+    fn line_side(&self) -> Side {
+        if self.visible.iter().any(|v| !numbers_on(v, Side::New).is_empty()) {
+            Side::New
         } else {
-            Row::old_no
+            Side::Old
         }
     }
 
@@ -4082,7 +4086,7 @@ impl App {
             return self.rendered.content.as_ref().map_or(0, |c| c.text.lines().count());
         }
         let side = self.line_side();
-        crate::marks::diff_lines(&self.visible).filter_map(side).max().unwrap_or(0) as usize
+        self.visible.iter().flat_map(|v| numbers_on(v, side)).max().unwrap_or(0) as usize
     }
 
     /// Paste into the line field: a number or `$` replaces it, wrapping punctuation dropped;
@@ -4126,7 +4130,7 @@ impl App {
     }
 
     /// The row holding line `n` by `side`, its fold opened first: find steps and `:N` share it.
-    fn land_on_line(&mut self, n: u32, side: fn(&Row) -> Option<u32>) -> usize {
+    fn land_on_line(&mut self, n: u32, side: Side) -> usize {
         let row = line_row(&self.visible, n, side);
         let Some(anchor) = self.visible[row].fold_anchor() else { return row };
         self.expanded_folds.insert(anchor);
@@ -4172,6 +4176,7 @@ impl App {
             if here {
                 cursor_rank = hits.len();
             }
+            let Some(row) = row.row() else { continue };
             if let Row::Fold { lines } = row {
                 // Folded lines are context, so each has a new-side number.
                 let folded = lines.iter().filter(|l| is_hit(l)).filter_map(Row::new_no);
@@ -4208,7 +4213,7 @@ impl App {
         };
         match hits[target] {
             FindHit::Visible(v) => self.diff_cursor = v,
-            FindHit::Folded { new_no } => self.diff_cursor = self.land_on_line(new_no, Row::new_no),
+            FindHit::Folded { new_no } => self.diff_cursor = self.land_on_line(new_no, Side::New),
         }
         self.reveal_diff = true;
     }
@@ -5227,18 +5232,26 @@ fn is_change(row: &Row) -> bool {
     }
 }
 
+/// Whether row `v` shows a change: a changed source or rendered row, or a changed pair.
+fn shows_change(v: &Visible) -> bool {
+    match v {
+        Visible::Row(row) => is_change(row),
+        Visible::Pair(p) => p.changed,
+    }
+}
+
 /// The nearest hunk start past `from` that way, or from the far end when `None`.
-fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
-    let joins = |a: &Row, b: &Row| match (a, b) {
+fn hunk_row(rows: &[Visible], from: Option<usize>, forward: bool) -> Option<usize> {
+    let joins = |a: &Visible, b: &Visible| match (a.row(), b.row()) {
         (
-            Row::Rendered { kind: RenderedKind::Block { bar: Some(_), .. }, .. },
-            Row::Rendered { kind: RenderedKind::Block { .. }, .. },
+            Some(Row::Rendered { kind: RenderedKind::Block { bar: Some(_), .. }, .. }),
+            Some(Row::Rendered { kind: RenderedKind::Block { .. }, .. }),
         ) => true,
-        (Row::Rendered { .. }, _) | (_, Row::Rendered { .. }) => false,
-        _ => is_change(a),
+        (Some(Row::Rendered { .. }), _) | (_, Some(Row::Rendered { .. })) => false,
+        _ => shows_change(a),
     };
     let starts_hunk =
-        |&i: &usize| is_change(&rows[i]) && (i == 0 || !joins(&rows[i - 1], &rows[i]));
+        |&i: &usize| shows_change(&rows[i]) && (i == 0 || !joins(&rows[i - 1], &rows[i]));
     if forward {
         (from.map_or(0, |i| i + 1)..rows.len()).find(starts_hunk)
     } else {
@@ -5280,27 +5293,44 @@ fn worktree_content(repo: &std::path::Path, path: &str) -> Result<String, crate:
 }
 
 /// The current line row `i` stands for, else a fold's first, the next below, the next above.
-fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
-    let line_of = |r: &Row| match r {
-        Row::Fold { lines } => lines.first().and_then(Row::new_no),
-        _ => r.new_no(),
+fn source_line_at(rows: &[Visible], i: usize) -> Option<u32> {
+    let line_of = |v: &Visible| match v.row() {
+        Some(Row::Fold { lines }) => lines.first().and_then(Row::new_no),
+        _ => v.new_no(),
     };
     let at = i.min(rows.len());
     rows[at..].iter().find_map(line_of).or_else(|| rows[..at].iter().rev().find_map(line_of))
 }
 
+/// `row`'s line number on `side`.
+fn number_on(row: &Row, side: Side) -> Option<u32> {
+    match side {
+        Side::New => row.new_no(),
+        Side::Old => row.old_no(),
+    }
+}
+
+/// The line numbers on `side` that row `v` holds, a collapsed fold's hidden ones included.
+fn numbers_on(v: &Visible, side: Side) -> Vec<u32> {
+    match v {
+        Visible::Row(Row::Fold { lines }) => {
+            lines.iter().filter_map(|l| number_on(l, side)).collect()
+        }
+        Visible::Row(row) => number_on(row, side).into_iter().collect(),
+        Visible::Pair(_) => match side {
+            Side::New => v.new_no().into_iter().collect(),
+            Side::Old => v.old_no().into_iter().collect(),
+        },
+    }
+}
+
 /// The row holding `line` by `side`: its own, the fold hiding it, the next, or the last numbered.
-fn line_row(rows: &[Row], line: u32, side: fn(&Row) -> Option<u32>) -> usize {
-    // A row's lines, a collapsed fold's hidden ones included.
-    let any_line = |r: &Row, pred: &dyn Fn(Option<u32>) -> bool| {
-        crate::marks::diff_lines(std::slice::from_ref(r)).any(|l| pred(side(l)))
-    };
-    let numbered = |r: &Row| any_line(r, &|n| n.is_some());
-    let holds = |r: &Row| any_line(r, &|n| n == Some(line));
+fn line_row(rows: &[Visible], line: u32, side: Side) -> usize {
+    let first = |v: &Visible| numbers_on(v, side).first().copied();
     rows.iter()
-        .position(holds)
-        .or_else(|| rows.iter().position(|r| side(r).is_some_and(|n| n > line)))
-        .or_else(|| rows.iter().rposition(numbered))
+        .position(|v| numbers_on(v, side).contains(&line))
+        .or_else(|| rows.iter().position(|v| first(v).is_some_and(|n| n > line)))
+        .or_else(|| rows.iter().rposition(|v| first(v).is_some()))
         .unwrap_or(rows.len().saturating_sub(1))
 }
 
@@ -5332,11 +5362,11 @@ impl LineMap {
     }
 }
 
-/// Whether source row `row` lies in `c`'s range on its side.
-fn line_in(c: &Comment, row: &Row) -> bool {
+/// Whether row `v` holds a line in `c`'s range on its side.
+fn line_in(c: &Comment, v: &Visible) -> bool {
     let no = match c.side {
-        Side::New => row.new_no(),
-        Side::Old => row.old_no(),
+        Side::New => v.new_no(),
+        Side::Old => v.old_no(),
     };
     no.is_some_and(|n| c.start <= n && n <= c.end)
 }
@@ -5365,7 +5395,7 @@ fn anchor(selected: &[Row]) -> Option<(Side, u32, u32, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, Mode};
+    use super::{App, Mode, Visible};
     use crate::config::NavigatorPosition;
     use crate::model::{Comment, CommitPick, Scope, Side};
     use crate::test_support::test_repo;
@@ -5471,7 +5501,10 @@ mod tests {
         assert_eq!(colors(&recovered), before, "the list freezes the view under it");
         recovered.mode = Mode::Normal;
         recovered.sync_rendered_width(80); // the next frame
-        assert!(matches!(recovered.visible.first(), Some(crate::diff::Row::Rendered { .. })));
+        assert!(matches!(
+            recovered.visible.first().and_then(Visible::row),
+            Some(crate::diff::Row::Rendered { .. })
+        ));
         assert_ne!(colors(&recovered), before, "the rows repaint in the recovered theme");
     }
 
@@ -5755,7 +5788,10 @@ mod tests {
             Row::Insertion { new_no: 10, spans: bare(), emphasis: Vec::new(), cr: false },
             Row::Deletion { old_no: 11, spans: bare(), emphasis: Vec::new(), cr: false },
             Row::Insertion { new_no: 12, spans: bare(), emphasis: Vec::new(), cr: false },
-        ];
+        ]
+        .into_iter()
+        .map(Visible::Row)
+        .collect();
         app.diff_cursor = 1;
         app
     }
@@ -5779,12 +5815,12 @@ mod tests {
                 "read pane, nothing numbered above",
                 Box::new(|a: &mut App| {
                     a.visible.truncate(1);
-                    a.visible[0] = crate::diff::Row::Deletion {
+                    a.visible[0] = Visible::Row(crate::diff::Row::Deletion {
                         old_no: 3,
                         spans: Vec::new(),
                         emphasis: Vec::new(),
                         cr: false,
-                    };
+                    });
                     a.diff_cursor = 0;
                 }),
                 target("src/lib.rs", 1),

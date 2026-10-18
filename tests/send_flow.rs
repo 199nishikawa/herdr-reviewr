@@ -13,6 +13,7 @@ use std::thread;
 use common::{Repo, app_on, fake_herdr, herdr_calls, herdr_error};
 use herdr_reviewr::app::{App, Focus, Mode};
 use herdr_reviewr::keymap::Keymap;
+use herdr_reviewr::split::UnifiedRow as _;
 use herdr_reviewr::ui;
 use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::crossterm::event::{

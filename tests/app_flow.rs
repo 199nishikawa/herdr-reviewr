@@ -14,6 +14,7 @@ use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
 use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingCode, Keymap};
 use herdr_reviewr::model::{Scope, Side};
+use herdr_reviewr::split::{UnifiedRow as _, Visible};
 use herdr_reviewr::turn::Status;
 use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::crossterm::event::{
@@ -933,7 +934,7 @@ fn the_diff_shows_an_edit_made_in_the_editor_after_the_refresh() {
     let text = |a: &App| {
         a.visible
             .iter()
-            .flat_map(|row| row.spans().iter().map(|s| s.text.clone()))
+            .flat_map(|row| row.unified().spans().iter().map(|s| s.text.clone()))
             .collect::<String>()
     };
     assert!(!text(&app).contains("sixth-line-from-the-editor"), "not on screen before the refresh");
@@ -3970,7 +3971,10 @@ fn find_searches_folded_content_and_a_step_expands_the_fold() {
     app.focus = Focus::Diff;
 
     // A leading fold hides line 1 ("total = 0"); the change at line 12 shows "last = total".
-    assert!(app.visible.iter().any(|row| matches!(row, Row::Fold { .. })), "a fold hides the head");
+    assert!(
+        app.visible.iter().any(|row| matches!(row.row(), Some(Row::Fold { .. }))),
+        "a fold hides the head"
+    );
 
     open_find(&mut app, &keymap);
     find_type(&mut app, &keymap, "total");
@@ -4018,7 +4022,6 @@ fn find_is_inert_in_wrong_contexts() {
 
 #[test]
 fn find_is_inert_without_content_rows() {
-    use herdr_reviewr::diff::Row;
     // An empty file has no content rows, so `find_available` is false.
     let r = Repo::init();
     r.write("base.txt", "x\n");
@@ -4028,7 +4031,7 @@ fn find_is_inert_without_content_rows() {
     let keymap = Keymap::default();
     assert_eq!(app.diff_path.as_deref(), Some("empty.rs"));
     app.focus = Focus::Diff;
-    assert!(!app.visible.iter().any(Row::is_content), "the empty file has no content rows");
+    assert!(!app.visible.iter().any(Visible::is_content), "the empty file has no content rows");
     open_find(&mut app, &keymap);
     assert_ne!(app.mode, Mode::Find, "find is inert on a file with no content rows");
 }
@@ -4217,11 +4220,11 @@ fn a_markdown_file_opens_rendered_with_a_cursor() {
     // `Changes` opens markdown rendered.
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
     assert!(app.rendered_active(), "a markdown file opens rendered on the Changes tab");
-    assert!(app.visible.iter().all(|row| matches!(row, Row::Rendered { .. })));
+    assert!(app.visible.iter().all(|row| matches!(row.row(), Some(Row::Rendered { .. }))));
     assert!(app.visible[0].text().contains("Title"));
     assert!(!app.visible.iter().any(|row| row.text().contains("**")), "emphasis is consumed");
     assert!(
-        matches!(app.visible[0], Row::Rendered { src: 1, .. }),
+        matches!(app.visible[0].row(), Some(Row::Rendered { src: 1, .. })),
         "a rendered row names its block"
     );
     assert_eq!(app.visible[0].new_no(), None, "and is no source line itself");
@@ -4242,7 +4245,7 @@ fn a_markdown_file_opens_rendered_with_a_cursor() {
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
     assert!(app.rendered_active(), "a markdown file opens rendered in All files");
-    assert!(app.visible.iter().all(|row| matches!(row, Row::Rendered { .. })));
+    assert!(app.visible.iter().all(|row| matches!(row.row(), Some(Row::Rendered { .. }))));
 }
 
 #[test]
@@ -4375,7 +4378,7 @@ fn the_description_row_pins_first_and_follows_refetches() {
 fn m_flips_between_rendered_and_source_at_the_same_block() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::Row;
-    let block_of = |app: &App| match app.visible[app.diff_cursor] {
+    let block_of = |app: &App| match *app.visible[app.diff_cursor].unified() {
         Row::Rendered { src, src_end, kind: RenderedKind::Block { wrap, .. }, .. } => {
             (src, src_end, wrap)
         }
@@ -4419,7 +4422,7 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
     app.toggle_rendered();
     assert!(!app.rendered_active());
     let del = app.visible.iter().position(|row| row.marker() == '-').expect("a deletion row");
-    let below = app.visible[del..].iter().find_map(Row::new_no).unwrap();
+    let below = app.visible[del..].iter().find_map(Visible::new_no).unwrap();
     app.diff_cursor = del;
     app.toggle_rendered();
     assert!(app.rendered_active());
@@ -4468,7 +4471,7 @@ fn a_fold_under_the_source_cursor_flips_to_its_first_hidden_line() {
     app.diff_cursor = 0;
     app.toggle_rendered();
     assert!(app.rendered_active());
-    assert!(matches!(app.visible[app.diff_cursor], Row::Rendered { src: 1, .. }));
+    assert!(matches!(app.visible[app.diff_cursor].row(), Some(Row::Rendered { src: 1, .. })));
 
     // A folded block lands on its fold; an expanded fold survives the trip.
     app.toggle_rendered();
@@ -4563,7 +4566,7 @@ fn both_file_tabs_show_one_markdown_file_by_the_panes_choice() {
 fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::Row;
-    let id = |app: &App| match app.visible[app.diff_cursor] {
+    let id = |app: &App| match *app.visible[app.diff_cursor].unified() {
         Row::Rendered { src, kind: RenderedKind::Block { wrap, .. }, .. } => (src, wrap),
         _ => panic!("the cursor is on a rendered row"),
     };
@@ -4589,8 +4592,12 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
         .iter()
         .position(|row| {
             matches!(
-                row,
-                Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: Some(1), .. }, .. }
+                row.row(),
+                Some(Row::Rendered {
+                    src: 12,
+                    kind: RenderedKind::Block { wrap: Some(1), .. },
+                    ..
+                })
             )
         })
         .expect("the paragraph wraps at 60 columns");
@@ -4601,8 +4608,8 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     app.reload().unwrap();
     assert_eq!(id(&app), (12, Some(1)), "a poll edit above keeps the cursor's line");
     assert!(matches!(
-        app.visible[app.diff_scroll],
-        Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: Some(0), .. }, .. }
+        app.visible[app.diff_scroll].row(),
+        Some(Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: Some(0), .. }, .. })
     ));
 
     // Rewraps keep the line; a wide pane clamps the wrap.
@@ -4931,6 +4938,7 @@ mod search_overlay {
     use herdr_reviewr::search::{
         CodeHit, FileHit, SearchCompletion, SearchJob, SearchOutcome, SearchResults,
     };
+    use herdr_reviewr::split::UnifiedRow as _;
     use ratatui::crossterm::event::KeyCode;
 
     fn results(files: Vec<FileHit>, code: Vec<CodeHit>) -> SearchResults {
@@ -8356,7 +8364,7 @@ fn painted_colors(app: &App) -> Vec<ratatui::style::Color> {
 
 /// Row `i`'s text as painted.
 fn painted(app: &App, i: usize) -> String {
-    match &app.visible[i] {
+    match app.visible[i].unified() {
         Row::Rendered { kind: RenderedKind::Marker { kind, lines, .. }, .. } => {
             herdr_reviewr::ui::marker_text(*kind, *lines, "m")
         }
@@ -8680,7 +8688,7 @@ fn replaced_line_app(old: &str, new: &str) -> (Repo, App) {
 
 /// The rendered block source line of row `i`.
 fn rendered_src(app: &App, i: usize) -> u32 {
-    match &app.visible[i] {
+    match app.visible[i].unified() {
         herdr_reviewr::diff::Row::Rendered { src, .. } => *src,
         row => panic!("not a rendered row: {row:?}"),
     }
@@ -8907,8 +8915,8 @@ enum Wears {
     Marker(MarkerKind),
 }
 
-fn wears(row: &Row) -> Wears {
-    match row {
+fn wears(row: &Visible) -> Wears {
+    match row.unified() {
         Row::Rendered { kind: RenderedKind::Block { bar: None, .. }, .. } => Wears::Nothing,
         Row::Rendered { kind: RenderedKind::Block { bar: Some(b), .. }, .. } => Wears::Bar(*b),
         Row::Rendered { kind: RenderedKind::Marker { kind, .. }, .. } => Wears::Marker(*kind),
@@ -9045,8 +9053,8 @@ fn a_changed_details_opens_and_a_reviewer_collapse_holds_across_a_poll() {
     let summary = rendered_row(&app, "▸ More");
     assert!(
         matches!(
-            app.visible[summary],
-            Row::Rendered { kind: RenderedKind::Block { hides: Some(2), .. }, .. }
+            app.visible[summary].row(),
+            Some(Row::Rendered { kind: RenderedKind::Block { hides: Some(2), .. }, .. })
         ),
         "the summary carries the changed lines its body hides"
     );
@@ -9175,7 +9183,7 @@ fn edit_in_the_rendered_view_opens_at_the_cursor_blocks_first_source_line() {
 
     // A marker row opens at the line it sits at: the removed block's place.
     app.diff_cursor = rendered_row(&app, "removed");
-    let Row::Rendered { src: at, .. } = app.visible[app.diff_cursor] else {
+    let Row::Rendered { src: at, .. } = *app.visible[app.diff_cursor].unified() else {
         panic!("a marker row")
     };
     press(&mut app, &keymap, KeyCode::Char('e'));
@@ -9855,7 +9863,7 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
         // Every view reads the file as is, and no export carries a CR.
         enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
         app.select_file(file_row_of(&app, "a.txt").expect("a.txt listed")).unwrap();
-        let lines: Vec<String> = app.visible.iter().map(Row::text).collect();
+        let lines: Vec<String> = app.visible.iter().map(Visible::text).collect();
         let raw: Vec<&str> = written.split_inclusive('\n').collect();
         let bodies: Vec<&str> = raw.iter().map(|l| l.trim_end_matches(['\r', '\n'])).collect();
         assert_eq!(lines, bodies, "{case}: the file's lines, no ending CR");
@@ -10075,7 +10083,7 @@ fn goto_line_lands_on_the_new_sides_line_in_the_changes_diff() {
     assert_eq!(app.line_count(), 12, "the new side's lines, the folded head among them");
 
     // Line 1 hides in the leading fold: the jump opens it and lands there.
-    assert!(app.visible.iter().any(|row| matches!(row, Row::Fold { .. })));
+    assert!(app.visible.iter().any(|row| matches!(row.row(), Some(Row::Fold { .. }))));
     let before = app.visible.len();
     app.goto_line(1);
     assert!(app.visible.len() > before, "the fold opened");

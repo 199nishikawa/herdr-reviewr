@@ -16,6 +16,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use crate::config::NavigatorPosition;
 use crate::diff::{FileDiff, MarkerKind, Notice, RenderedKind, Row};
+use crate::split::Visible;
+
+/// A painted row as unified; split rows paint from ticket 03 on, which deletes this.
+fn unified_row(v: &Visible) -> &Row {
+    v.row().expect("split rows don't paint yet")
+}
 use crate::file_list::RowKind;
 use crate::forge;
 use crate::git;
@@ -340,7 +346,7 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let base = row_height(r, gutter_w, width, app.wrap);
+            let base = row_height(unified_row(r), gutter_w, width, app.wrap);
             let card: usize = cards
                 .iter()
                 .filter(|&&(row, ci)| row == i && Some(ci) != editing)
@@ -392,7 +398,7 @@ fn read_layout(app: &App, inner: Rect, cards: &[(usize, usize)]) -> Vec<Slot> {
     let rows = app.visible.len();
     // Code lines, then card lines, in paint order.
     let row_slots = |i: usize| -> Vec<Slot> {
-        let segs = row_height(&app.visible[i], gutter_w, width, app.wrap);
+        let segs = row_height(unified_row(&app.visible[i]), gutter_w, width, app.wrap);
         let mut out: Vec<Slot> = (0..segs).map(|seg| Slot::Code { row: i, seg }).collect();
         for &(_, ci) in cards.iter().filter(|&&(row, _)| row == i) {
             if Some(ci) != editing
@@ -488,7 +494,7 @@ pub fn widest_visible_row(app: &App, area: Rect) -> usize {
         .iter()
         .skip(app.diff_scroll)
         .take(content.height as usize)
-        .map(|r| plain_cells(r).iter().map(|c| c.w).sum())
+        .map(|r| plain_cells(unified_row(r)).iter().map(|c| c.w).sum())
         .max()
         .unwrap_or(0)
 }
@@ -529,7 +535,7 @@ pub fn read_point_at(area: Rect, app: &App, col: u16, row: u16) -> Option<crate:
     let Slot::Code { row: li, seg } = *slots.get((row - pane.inner.y) as usize)? else {
         return None;
     };
-    let r = &app.visible[li];
+    let r = unified_row(&app.visible[li]);
     if !r.is_content() {
         return None;
     }
@@ -562,7 +568,7 @@ pub fn read_point_clamped(
         .chain(at + 1..slots.len())
         .find(|&i| matches!(slots.get(i), Some(Slot::Code { .. })))?;
     let Slot::Code { row: li, seg } = slots[code] else { return None };
-    let r = &app.visible[li];
+    let r = unified_row(&app.visible[li]);
     if !r.is_content() {
         // A fold paints as one Code slot; snap its endpoint to the row's start.
         return Some(crate::selection::Point { row: li, chr: 0 });
@@ -642,7 +648,7 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
                 if li < lo.row || li > hi.row {
                     continue;
                 }
-                let row_ref = &app.visible[li];
+                let row_ref = unified_row(&app.visible[li]);
                 if !row_ref.is_content() {
                     continue;
                 }
@@ -1838,7 +1844,8 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                         hovered: hovered_row == Some(row),
                         lead: app.is_rendered_lead(row),
                     };
-                    row_cache = Some((row, render_row(&app.visible[row], layout, state)));
+                    row_cache =
+                        Some((row, render_row(unified_row(&app.visible[row]), layout, state)));
                 }
                 row_cache.as_ref().and_then(|(_, l)| l.get(seg).cloned()).unwrap_or_default()
             }
@@ -4390,7 +4397,7 @@ fn note_rendered_regions(app: &App, slots: &[Slot], inner: Rect, prefix_w: usize
     for (off, slot) in slots.iter().enumerate() {
         let Slot::Code { row, .. } = *slot else { continue };
         let Some(Row::Rendered { kind: RenderedKind::Block { line, .. }, .. }) =
-            app.visible.get(row)
+            app.visible.get(row).and_then(Visible::row)
         else {
             continue;
         };

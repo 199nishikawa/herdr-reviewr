@@ -1,7 +1,7 @@
 //! Mouse text selection as pure data, and the clipboard text of what it spans.
 
-use crate::diff::Row;
 use crate::file_list::{self, RowKind};
+use crate::split::Visible;
 
 /// Where a text drag lives, locked at mouse-down (`TS-ONE-SURFACE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,13 +63,11 @@ impl TextDrag {
 
 /// A `Read` selection's text: each spanned line once, cut at the ends, folds skipped.
 #[must_use]
-pub fn read_text(rows: &[Row], a: Point, b: Point) -> String {
+pub fn read_text(rows: &[Visible], a: Point, b: Point) -> String {
     let hi_row = b.row.min(rows.len().saturating_sub(1));
     let mut out = Vec::new();
     for (i, row) in rows.iter().enumerate().take(hi_row + 1).skip(a.row) {
-        if !row.is_content() {
-            continue;
-        }
+        let Some(row) = row.row().filter(|r| r.is_content()) else { continue };
         let text = row.text();
         let from = if i == a.row { a.chr } else { 0 };
         let to = if i == hi_row { Some(b.chr) } else { None };
@@ -149,26 +147,30 @@ pub fn copied_status(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::Span;
+    use crate::diff::{Row, Span};
 
     fn spans(text: &str) -> Vec<Span> {
         vec![Span { text: text.into(), color: (0, 0, 0) }]
     }
 
-    fn ctx(text: &str) -> Row {
+    fn context(text: &str) -> Row {
         Row::Context { old_no: 1, new_no: 1, spans: spans(text) }
     }
 
-    fn del(text: &str) -> Row {
-        Row::Deletion { old_no: 1, spans: spans(text), emphasis: vec![], cr: false }
+    fn ctx(text: &str) -> Visible {
+        Visible::Row(context(text))
     }
 
-    fn ins(text: &str) -> Row {
-        Row::Insertion { new_no: 1, spans: spans(text), emphasis: vec![], cr: false }
+    fn del(text: &str) -> Visible {
+        Visible::Row(Row::Deletion { old_no: 1, spans: spans(text), emphasis: vec![], cr: false })
     }
 
-    fn fold(hidden: usize) -> Row {
-        Row::Fold { lines: (0..hidden).map(|_| ctx("hidden")).collect() }
+    fn ins(text: &str) -> Visible {
+        Visible::Row(Row::Insertion { new_no: 1, spans: spans(text), emphasis: vec![], cr: false })
+    }
+
+    fn fold(hidden: usize) -> Visible {
+        Visible::Row(Row::Fold { lines: (0..hidden).map(|_| context("hidden")).collect() })
     }
 
     fn point(row: usize, chr: usize) -> Point {
