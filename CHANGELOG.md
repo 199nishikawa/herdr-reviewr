@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.48.0] — 2026-10-19
+
 ### Added
 - **Review prefix**: `review_prefix` puts your own text above the comments on every send and copy.
   Thanks [@macintacos](https://github.com/macintacos) ([#129](https://github.com/persiyanov/herdr-reviewr/issues/129)).
