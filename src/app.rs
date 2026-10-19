@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::config::DiffView;
 use crate::diff::{DiffCache, FileDiff, RenderedKind, Row, View};
-use crate::export::{Agent, ExportTarget, format_all};
+use crate::export::{Agent, ExportTarget, format_review};
 use crate::file_list::{self, Entry, RowKind};
 use crate::forge;
 use crate::git;
@@ -5166,7 +5166,8 @@ impl App {
             return false;
         }
         let refs: Vec<&Comment> = self.store.iter().collect();
-        let text = format_all(&refs);
+        let prefix = self.plugin_config().and_then(crate::config::PluginConfig::review_prefix);
+        let text = format_review(prefix, &refs);
         let n = refs.len();
         logln!("export ({n}) -> {} ::\n{text}", target.label());
         let delivered = match target.export(&text) {

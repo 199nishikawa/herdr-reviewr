@@ -60,7 +60,7 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 14] = [
+const PLUGIN_CONFIG_KEYS: [&str; 15] = [
     "theme",
     "default_scope",
     "markdown_view",
@@ -74,6 +74,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 14] = [
     "azure_devops_host",
     "editor",
     "url_opener",
+    "review_prefix",
     "keybindings",
 ];
 
@@ -183,6 +184,7 @@ pub struct PluginConfig {
     azure_devops_host: Option<String>,
     editor: Option<String>,
     url_opener: Option<String>,
+    review_prefix: Option<String>,
     keymap: crate::keymap::Keymap,
 }
 
@@ -202,6 +204,7 @@ impl Default for PluginConfig {
             azure_devops_host: None,
             editor: None,
             url_opener: None,
+            review_prefix: None,
             keymap: crate::keymap::Keymap::default(),
         }
     }
@@ -271,6 +274,11 @@ impl PluginConfig {
 
     pub fn url_opener(&self) -> Option<&str> {
         self.url_opener.as_deref()
+    }
+
+    /// Text that heads every exported review, verbatim.
+    pub fn review_prefix(&self) -> Option<&str> {
+        self.review_prefix.as_deref()
     }
 
     /// The resolved keymap: the defaults with this snapshot's `[keybindings]` applied.
@@ -487,6 +495,14 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             ));
         }
         config.url_opener = Some(command.to_owned());
+    }
+    if let Some(value) = table.get("review_prefix") {
+        let prefix = value
+            .as_str()
+            .map(|text| text.replace('\r', "").trim_end().to_owned())
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| value_error(path, value, "review_prefix", "non-empty text"))?;
+        config.review_prefix = Some(prefix);
     }
     // One hostname per forge; the later key's error names the earlier owner.
     let host_keys = [
@@ -821,6 +837,19 @@ mod tests {
     }
 
     #[test]
+    fn the_review_prefix_keeps_its_text_but_not_its_trailing_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "review_prefix = \"\"\"\n/fix {all} of these\r\n\n  then test\n\n\"\"\"\n",
+        )
+        .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.review_prefix(), Some("/fix {all} of these\n\n  then test"));
+    }
+
+    #[test]
     fn the_url_opener_reaches_the_resolved_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -878,6 +907,9 @@ mod tests {
             ("url_opener = \"bridge {ur}\"\n", "`{ur}`"),
             ("url_opener = \"''\"\n", "`url_opener`"),
             ("url_opener = \"{url} --new\"\n", "`url_opener`"),
+            ("review_prefix = \"\"\n", "`review_prefix`"),
+            ("review_prefix = \"\"\"\n  \n\"\"\"\n", "`review_prefix`"),
+            ("review_prefix = 42\n", "`review_prefix`"),
             ("github_host = \"github.com\"\n", "`github_host`"),
             ("github_host = \"gitlab.com\"\n", "`github_host`"),
             ("gitlab_host = \"gitlab.com\"\n", "`gitlab_host`"),

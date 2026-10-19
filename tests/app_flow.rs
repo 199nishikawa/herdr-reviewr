@@ -1442,6 +1442,28 @@ fn send_consumes_the_whole_set() {
 }
 
 #[test]
+fn the_review_prefix_heads_every_export_and_a_save_changes_it() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "review_prefix = \"/address-review\"\n").unwrap();
+    app.set_plugin_config(herdr_reviewr::config::plugin_config_in(dir.path()).unwrap());
+    comment_on(&mut app, '+', "one");
+
+    let target = FakeTarget::ok();
+    app.export(&target);
+    let sent = target.last();
+    assert!(sent.starts_with("/address-review\n\na.rs:"), "prefix, blank line, comments: {sent:?}");
+
+    std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+    app.set_plugin_config(herdr_reviewr::config::plugin_config_in(dir.path()).unwrap());
+    comment_on(&mut app, '+', "two");
+    app.export(&target);
+    assert!(target.last().starts_with("a.rs:"), "unset, the review leads with a comment");
+}
+
+#[test]
 fn a_comment_of_only_blank_lines_is_cancelled() {
     let r = edited_repo();
     let mut app = app_on(&r);

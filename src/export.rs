@@ -27,6 +27,15 @@ pub fn format_all(comments: &[&Comment]) -> String {
     sorted.iter().map(|c| format_comment(c)).collect::<Vec<_>>().join("\n\n")
 }
 
+/// The exported review: the configured prefix, if any, a blank line above the comments.
+pub fn format_review(prefix: Option<&str>, comments: &[&Comment]) -> String {
+    let comments = format_all(comments);
+    match prefix {
+        Some(prefix) => format!("{prefix}\n\n{comments}"),
+        None => comments,
+    }
+}
+
 /// A destination comments can be exported to. Export succeeds or errors as a whole.
 pub trait ExportTarget {
     fn export(&self, text: &str) -> Result<()>;
@@ -198,7 +207,9 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, Clipboard, ExportTarget, format_all, format_comment, send_failure};
+    use super::{
+        Agent, Clipboard, ExportTarget, format_all, format_comment, format_review, send_failure,
+    };
     use crate::model::{Comment, Side};
 
     #[cfg(not(windows))]
@@ -323,5 +334,15 @@ mod tests {
         let a1 = comment("a.rs", Side::New, 3, 3, "+z", "earlier");
         let out = format_all(&[&b, &a2, &a1]);
         assert_eq!(out, "a.rs:3\n+z\nearlier\n\na.rs:20\n+y\nlater\n\nb.rs:5\n+x\ntwo");
+    }
+
+    #[test]
+    fn the_prefix_heads_the_review_and_keeps_its_blank_lines() {
+        let a = comment("a.rs", Side::New, 3, 3, "+z", "rename");
+        assert_eq!(
+            format_review(Some("/fix\n\nthen test"), &[&a]),
+            "/fix\n\nthen test\n\na.rs:3\n+z\nrename"
+        );
+        assert_eq!(format_review(None, &[&a]), "a.rs:3\n+z\nrename");
     }
 }

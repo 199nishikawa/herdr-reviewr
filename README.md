@@ -201,6 +201,7 @@ toggle_direction = "down"           # right | down, for split
 auto_open = false
 editor = "code -g {file}:{line}"
 url_opener = "browser-bridge --new-tab {url}"
+review_prefix = "Fix each comment, then run the tests."
 github_host = "github.example.com"
 gitlab_host = "git.corp.example"
 azure_devops_host = "tfs.corp.example"
@@ -248,6 +249,12 @@ open at the right line. A terminal editor takes the pane until you quit. For any
 Links open with `open`, `xdg-open`, or the Windows default browser. Under `herdr --remote`, set
 `url_opener` to something that reaches your browser. The URL is passed as one argument, never
 through a shell, so don't use `ssh host open {url}`.
+
+### Review prefix
+
+`review_prefix` goes above your comments on every send and copy, exactly as written. The agent
+reads it as part of the paste, so a `/command` in it won't run as a command. To run one, type it
+in the agent's input before you press `s`.
 
 ### Keybindings
 
