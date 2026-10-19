@@ -276,7 +276,7 @@ impl PluginConfig {
         self.url_opener.as_deref()
     }
 
-    /// Text that heads every exported review, verbatim.
+    /// Text that heads every exported review, as written.
     pub fn review_prefix(&self) -> Option<&str> {
         self.review_prefix.as_deref()
     }
@@ -499,10 +499,9 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     if let Some(value) = table.get("review_prefix") {
         let prefix = value
             .as_str()
-            .map(|text| text.replace('\r', "").trim_end().to_owned())
             .filter(|text| !text.trim().is_empty())
             .ok_or_else(|| value_error(path, value, "review_prefix", "non-empty text"))?;
-        config.review_prefix = Some(prefix);
+        config.review_prefix = Some(prefix.to_owned());
     }
     // One hostname per forge; the later key's error names the earlier owner.
     let host_keys = [
@@ -837,16 +836,16 @@ mod tests {
     }
 
     #[test]
-    fn the_review_prefix_keeps_its_text_but_not_its_trailing_space() {
+    fn the_review_prefix_reaches_the_resolved_config_as_written() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "review_prefix = \"\"\"\n/fix {all} of these\r\n\n  then test\n\n\"\"\"\n",
+            "review_prefix = \"\"\"\n/fix {all} of these\n\n  then test\n\"\"\"\n",
         )
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
-        assert_eq!(config.review_prefix(), Some("/fix {all} of these\n\n  then test"));
+        assert_eq!(config.review_prefix(), Some("/fix {all} of these\n\n  then test\n"));
     }
 
     #[test]

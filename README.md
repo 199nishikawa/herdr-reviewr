@@ -252,9 +252,9 @@ through a shell, so don't use `ssh host open {url}`.
 
 ### Review prefix
 
-`review_prefix` goes above your comments on every send and copy, exactly as written. The agent
-reads it as part of the paste, so a `/command` in it won't run as a command. To run one, type it
-in the agent's input before you press `s`.
+`review_prefix` goes above your comments on every send and copy. It arrives as pasted text, so
+Claude Code won't run a `/command` in it. To run one, type it in the agent's input before you
+press `s`.
 
 ### Keybindings
 

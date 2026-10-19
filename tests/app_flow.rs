@@ -1442,7 +1442,7 @@ fn send_consumes_the_whole_set() {
 }
 
 #[test]
-fn the_review_prefix_heads_every_export_and_a_save_changes_it() {
+fn the_review_prefix_heads_every_export_from_the_current_config() {
     let r = edited_repo();
     let mut app = app_on(&r);
     let dir = tempfile::tempdir().unwrap();
@@ -8020,7 +8020,7 @@ fn a_commit_comment_renders_only_while_the_scope_reads_that_commit() {
     // The list and the export carry both, unchanged.
     assert_eq!(app.store.len(), 2);
     let all: Vec<&herdr_reviewr::model::Comment> = app.store.iter().collect();
-    let text = herdr_reviewr::export::format_all(&all);
+    let text = herdr_reviewr::export::format_review(None, &all);
     assert!(text.contains("worktree note") && text.contains("commit note"));
 }
 
@@ -8414,7 +8414,7 @@ fn a_rendered_comment_equals_the_source_comment() {
     app.start_comment();
     write_comment(&mut app, "tighten this");
     let rendered = app.store.get(0).unwrap().clone();
-    let rendered_export = herdr_reviewr::export::format_all(&[&rendered]);
+    let rendered_export = herdr_reviewr::export::format_review(None, &[&rendered]);
     assert_eq!((rendered.side, rendered.start, rendered.end), (Side::New, 3, 4));
     assert_eq!(
         rendered.lines, " alpha one\n-beta two\n+BETA TWO",
@@ -8432,7 +8432,7 @@ fn a_rendered_comment_equals_the_source_comment() {
     write_comment(&mut app, "tighten this");
     let source = app.store.get(0).unwrap().clone();
     assert_eq!(source, rendered, "same side, range, snippet, kind, and rev");
-    assert_eq!(herdr_reviewr::export::format_all(&[&source]), rendered_export);
+    assert_eq!(herdr_reviewr::export::format_review(None, &[&source]), rendered_export);
 
     // Two rendered blocks anchor lines 1..=4, the blank between included.
     app.store.take(0);
@@ -8445,7 +8445,7 @@ fn a_rendered_comment_equals_the_source_comment() {
     let rendered = app.store.take(0).unwrap();
     assert_eq!((rendered.side, rendered.start, rendered.end), (Side::New, 1, 4));
     assert_eq!(rendered.lines, " # Title\n \n alpha one\n-beta two\n+BETA TWO");
-    let rendered_export = herdr_reviewr::export::format_all(&[&rendered]);
+    let rendered_export = herdr_reviewr::export::format_review(None, &[&rendered]);
 
     app.toggle_rendered();
     app.diff_cursor = app.visible.iter().position(|r| r.new_no() == Some(1)).unwrap();
@@ -8455,7 +8455,7 @@ fn a_rendered_comment_equals_the_source_comment() {
     write_comment(&mut app, "both");
     let source = app.store.get(0).unwrap();
     assert_eq!(*source, rendered, "a multi-block range equals the contiguous source range");
-    assert_eq!(herdr_reviewr::export::format_all(&[source]), rendered_export);
+    assert_eq!(herdr_reviewr::export::format_review(None, &[source]), rendered_export);
 }
 
 /// Comment the first `-` row in source, then return its card's rendered row.
@@ -9013,7 +9013,7 @@ fn a_removed_marker_comment_anchors_the_deleted_lines_on_the_old_side() {
     assert_eq!(c.side, Side::Old);
     assert!(c.lines.contains("-gone para"), "{:?}", c.lines);
     assert!(!c.lines.contains("keep"), "a marker stands for its own lines alone");
-    let out = herdr_reviewr::export::format_all(&[&c]);
+    let out = herdr_reviewr::export::format_review(None, &[&c]);
     assert!(out.contains("(removed)"), "{out}");
     // Its card sits under the marker.
     assert_eq!(app.card_rows(), vec![(marker, 0)]);
@@ -9900,7 +9900,7 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
         typed(&mut app, "why?");
         app.submit_comment();
         let all: Vec<&herdr_reviewr::model::Comment> = app.store.iter().collect();
-        let export = herdr_reviewr::export::format_all(&all);
+        let export = herdr_reviewr::export::format_review(None, &all);
         assert!(export.contains(&lines[1]) && !export.contains('\r'), "{case}: {export:?}");
 
         app.open_search();
@@ -9959,7 +9959,7 @@ fn an_untracked_or_renamed_crlf_file_reads_like_git() {
     typed(&mut app, "why?");
     app.submit_comment();
     let all: Vec<&herdr_reviewr::model::Comment> = app.store.iter().collect();
-    assert!(!herdr_reviewr::export::format_all(&all).contains('\r'));
+    assert!(!herdr_reviewr::export::format_review(None, &all).contains('\r'));
     app.select_file(file_row_of(&app, "moved.txt").expect("moved.txt listed")).unwrap();
     assert!(change_rows(&app).is_empty(), "{:?}", change_rows(&app));
 }
