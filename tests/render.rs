@@ -5053,6 +5053,33 @@ fn a_file_growing_past_999_lines_keeps_split() {
 }
 
 #[test]
+fn the_readme_names_the_pane_width_split_needs() {
+    let pane = (ui::SPLIT_MIN_WIDTH + 2).to_string(); // the read pane's two border cells
+    let readme = include_str!("../README.md");
+    assert_eq!(
+        readme.matches(&format!("{pane} columns")).count()
+            + readme.matches(&format!("{pane}\ncolumns")).count(),
+        2
+    );
+}
+
+#[test]
+fn a_hovered_split_row_shows_the_plus_on_each_half_it_paints() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    let out = dump(&split_frame(&mut app, 142));
+    let row = |text: &str| out.lines().position(|l| l.contains(text)).unwrap();
+    for (text, old_half) in [("TWO;", true), ("zero", false)] {
+        app.hover = Some((10, row(text) as u16));
+        let hovered = dump(&split_frame(&mut app, 142));
+        let (left, right) = halves(hovered.lines().nth(row(text)).unwrap());
+        assert_eq!(left.contains("[+]"), old_half, "a blank half shows none: {left:?}");
+        assert!(right.contains("[+]"), "{right:?}");
+    }
+}
+
+#[test]
 fn each_half_paints_its_own_side() {
     const EMPH_INS_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x30, 0x55, 0x3f);
     let r = split_repo();

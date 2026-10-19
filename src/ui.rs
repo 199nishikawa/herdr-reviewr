@@ -509,12 +509,20 @@ pub fn widest_visible_row(app: &App, area: Rect) -> usize {
 /// The read-pane geometry shared by every selection map below.
 struct ReadPane {
     inner: Rect,
+    gutter_w: usize,
     prefix_w: usize,
 }
 
 fn read_pane(area: Rect, app: &App) -> ReadPane {
     let inner = inner_rect(panes(area, app).diff);
-    ReadPane { inner, prefix_w: gutter_prefix_width(gutter_for(&app.diff)) }
+    let gutter_w = gutter_for(&app.diff);
+    ReadPane { inner, gutter_w, prefix_w: gutter_prefix_width(gutter_w) }
+}
+
+/// Whether display line `seg` of pair `p` paints on `side`'s half: a blank half or its padding never does.
+fn paints_on(app: &App, pane: &ReadPane, p: &Pair, seg: usize, side: Side) -> bool {
+    let [old, new] = half_heights(p, pane.gutter_w, pane.inner.width as usize, app.wrap);
+    seg < if side == Side::Old { old } else { new }
 }
 
 /// The read pane's content rows, minus the find band; a drag scrolls only past them.
@@ -543,8 +551,10 @@ pub fn read_point_at(
     let Slot::Code { row: li, seg } = *slots.get((row - pane.inner.y) as usize)? else {
         return None;
     };
-    let side = match app.visible[li] {
-        Visible::Pair(_) => Some(side_at(&pane, col)?),
+    let side = match &app.visible[li] {
+        Visible::Pair(p) => {
+            Some(side_at(&pane, col).filter(|&s| paints_on(app, &pane, p, seg, s))?)
+        }
         Visible::Row(_) => None,
     };
     let (x0, width, r) = text_column(app, &pane, li, side)?;
@@ -606,16 +616,10 @@ pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize>
         return None;
     };
     let in_gutter = |x0: usize| (x0..x0 + pane.prefix_w).contains(&(col as usize));
-    let gutter_w = gutter_for(&app.diff);
-    // A half's gutter is painted only on its own lines, never on a blank half or its padding.
     let hit = match &app.visible[li] {
-        Visible::Pair(p) => {
-            let heights = half_heights(p, gutter_w, pane.inner.width as usize, app.wrap);
-            [Side::Old, Side::New]
-                .into_iter()
-                .zip(heights)
-                .any(|(side, lines)| seg < lines && in_gutter(column(&pane, Some(side)).0))
-        }
+        Visible::Pair(p) => [Side::Old, Side::New].into_iter().any(|side| {
+            paints_on(app, &pane, p, seg, side) && in_gutter(column(&pane, Some(side)).0)
+        }),
         Visible::Row(row) => row.is_content() && in_gutter(pane.inner.x as usize),
     };
     hit.then_some(li)

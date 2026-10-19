@@ -2578,7 +2578,7 @@ fn dispatch_mouse(
             } else if let Some(i) =
                 ui::hit_diff(area, app, m.column, m.row, heights, app.diff_scroll)
             {
-                // Only non-text display lines reach here: a fold or a comment card's line.
+                // Only lines with no text under the pointer reach here: a fold, a card, a blank half.
                 app.focus = Focus::Diff;
                 app.diff_cursor = i;
                 app.select_anchor = None;

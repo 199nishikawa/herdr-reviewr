@@ -1438,8 +1438,7 @@ impl App {
         self.build_visible(false);
     }
 
-    /// Build `visible`, rendered else source; `choose` (a view switch) picks split or unified anew.
-    /// The one rebuild site, so it carries the place, the find band, and the marks.
+    /// The one rebuild of `visible`, carrying place, find and marks; `choose` (a switch) picks the layout.
     fn build_visible(&mut self, choose: bool) {
         // The last switch's line serves only the next switch, on the rows it landed on.
         let kept = self.switch_line.take();
@@ -1476,17 +1475,16 @@ impl App {
             let anchor = self.select_anchor.map(spot_at);
             (self.shown(), spot_at(self.diff_cursor), spot_at(self.diff_scroll), anchor)
         });
-        // Rendered rows built from the same input, base numbers included, still hold that line.
-        let input_before = kept
-            .filter(|_| !choose && was_rendered)
-            .and_then(|_| self.rendered.built.as_ref().map(|b| b.input.clone()));
-        let rendered = self.wants_rendered() && self.rebuild_rendered(edit.as_ref());
-        if rendered
-            && let Some(before) = input_before
-            && self.rendered.built.as_ref().is_some_and(|b| b.input == before)
-        {
+        let render = if self.wants_rendered() {
+            self.rebuild_rendered(edit.as_ref())
+        } else {
+            Render::Nothing
+        };
+        // Rendered rows kept from the same input, base numbers included, still hold that line.
+        if render == Render::Kept && !choose {
             self.switch_line = kept;
         }
+        let rendered = render != Render::Nothing;
         if !rendered {
             if !self.wants_rendered() {
                 self.rendered.built = None;
@@ -1651,9 +1649,9 @@ impl App {
     }
 
     /// Build the rendered rows unless their input is unchanged, carrying the place by identity.
-    /// `false` when the content renders nothing, a verdict kept for the same content.
-    fn rebuild_rendered(&mut self, edit: Option<&LineMap>) -> bool {
-        let Some(text) = self.rendered.text().map(str::to_string) else { return false };
+    /// `Nothing` when the content renders nothing, a verdict kept for the same content.
+    fn rebuild_rendered(&mut self, edit: Option<&LineMap>) -> Render {
+        let Some(text) = self.rendered.text().map(str::to_string) else { return Render::Nothing };
         let same_text = self.rendered.built.as_ref().is_some_and(|b| b.input.text == text);
         let details = if same_text && self.rendered.on_screen() {
             self.derived_details(&self.rendered.doc.disclosures)
@@ -1666,7 +1664,7 @@ impl App {
             && b.input == input
             && (b.empty || showing)
         {
-            return !b.empty;
+            return if b.empty { Render::Nothing } else { Render::Kept };
         }
         let mut open: HashSet<String> = input.details.iter().cloned().collect();
         let mut doc = self.markdown_render(&text, input.width, &open);
@@ -1678,7 +1676,7 @@ impl App {
         }
         if doc.lines.is_empty() {
             self.rendered.built = Some(Built { input, empty: true });
-            return false;
+            return Render::Nothing;
         }
         // The place, re-expressed in the new content's line numbers.
         let place = showing.then(|| {
@@ -1732,7 +1730,7 @@ impl App {
                 self.diff_scroll = i;
             }
         }
-        true
+        Render::Built
     }
 
     /// Rebuild the rendered rows when width or theme moved; a modal or gesture defers it.
@@ -2062,9 +2060,9 @@ impl App {
         self.split_width >= crate::ui::SPLIT_MIN_WIDTH
     }
 
-    /// Whether split is due: chosen, allowed and fitting.
+    /// Whether split is due: chosen, fitting and allowed (the cheap checks first).
     fn wants_split(&self) -> bool {
-        self.split_chosen == Some(DiffView::Split) && self.split_allowed() && self.split_fits()
+        self.split_chosen == Some(DiffView::Split) && self.split_fits() && self.split_allowed()
     }
 
     /// Whether the rows on screen hold their layout: a modal, a gesture or a row selection is open.
@@ -2091,7 +2089,7 @@ impl App {
 
     /// Whether `|` acts: split is on screen to leave, or the open diff can split at this width.
     pub(crate) fn split_acts(&self) -> bool {
-        self.split_on_screen() || (self.split_allowed() && self.split_fits())
+        self.split_on_screen() || (self.split_fits() && self.split_allowed())
     }
 
     /// `|`: flip the diff between unified and split, where split can show; inert elsewhere.
@@ -2099,7 +2097,6 @@ impl App {
         if !self.split_acts() {
             return;
         }
-        self.clear_selection();
         let to = if self.split_on_screen() { DiffView::Unified } else { DiffView::Split };
         self.split_chosen = Some(to);
         self.relayout();
@@ -2118,6 +2115,8 @@ impl App {
 
     /// Rebuild the rows in another layout, the cursor keeping its line at the same screen height.
     fn relayout(&mut self) {
+        // A selection's rows hold other lines in another layout (the width sync waits on one).
+        self.clear_selection();
         let above = self.diff_cursor.saturating_sub(self.diff_scroll);
         // Only while the cursor is still the row painted there (Continuity: identity first).
         let painted = self.cursor_line.get().filter(|&(row, _)| row == self.diff_cursor);
@@ -2688,11 +2687,10 @@ impl App {
         if self.active_file_tab != tab {
             self.swap_active_with_stash();
             self.active_file_tab = tab;
-            // Follow a markdown choice flipped while away; a selection's rows don't cross, as on `m`.
+            // Follow a markdown choice flipped while away.
             if self.rendered.on_screen() != self.wants_rendered()
                 && !self.rendered.renders_nothing()
             {
-                self.clear_selection();
                 self.relayout();
             }
         }
@@ -5478,6 +5476,14 @@ enum Shown {
     Rendered,
 }
 
+/// What a rendered rebuild did: nothing renders, the rows stand as built, or they were built anew.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Render {
+    Nothing,
+    Kept,
+    Built,
+}
+
 /// Where a place sat before a rebuild: its current new-side line, and the line it is on, by side.
 #[derive(Clone, Copy)]
 struct Spot {
@@ -5636,6 +5642,8 @@ mod tests {
         old.markdown_rendered = true; // flipped to rendered, away from the default
         old.split_chosen = Some(DiffView::Split);
         old.switch_line = Some((3, Side::Old, 2));
+        let row = super::Row::Context { old_no: 1, new_no: 1, spans: Vec::new() };
+        old.visible = vec![Visible::Pair(super::Pair::Same(row))];
         old.rendered.content =
             Some(crate::rendered::Content { text: "# doc".to_string(), old: None, nothing: false });
         old.rendered.details.insert("Details#0".to_string(), true);
@@ -5646,6 +5654,7 @@ mod tests {
         assert!(recovered.markdown_rendered, "the pane's choice survives a modal's recovery");
         assert_eq!(recovered.split_chosen, Some(DiffView::Split), "so does split");
         assert_eq!(recovered.switch_line, Some((3, Side::Old, 2)), "and the switch-back line");
+        assert!(recovered.split_on_screen(), "and the split rows the line was remembered on");
         assert_eq!(recovered.rendered.text(), Some("# doc"));
         assert_eq!(
             recovered.rendered.details.get("Details#0"),

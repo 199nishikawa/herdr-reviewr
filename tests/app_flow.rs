@@ -11737,7 +11737,7 @@ fn the_split_key_types_a_pipe_in_find_and_the_composer() {
 }
 
 #[test]
-fn a_wrapped_rows_padding_beside_the_shorter_half_takes_no_gutter_click() {
+fn a_wrapped_rows_padding_beside_the_shorter_half_is_inert() {
     let r = Repo::init();
     r.write("w.rs", &format!("{}\nkeep\n", "x".repeat(200)));
     r.commit_all("init");
@@ -11751,6 +11751,14 @@ fn a_wrapped_rows_padding_beside_the_shorter_half_takes_no_gutter_click() {
     let wrap = split_cell(&app, Side::Old, 1, -3);
     split_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), wrap);
     assert!(app.gutter_drag(), "the old half's wrap paints its bar, as unified does");
+    split_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), wrap);
+    app.cancel_comment();
+    app.diff_cursor = 0;
+    let text_pad = split_cell(&app, Side::New, 1, 2);
+    split_click(&mut app, text_pad);
+    split_click(&mut app, text_pad);
+    assert!(app.settled_selection().is_none(), "the new half's padding holds no text to copy");
+    assert_eq!(app.diff_cursor, 0, "a click on padding lands on its row");
 }
 
 #[test]

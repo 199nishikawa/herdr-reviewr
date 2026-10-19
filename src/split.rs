@@ -442,18 +442,13 @@ mod tests {
         assert!(twins.count() > 100, "the block holds many twins");
         let rows = split_rows(d.rows.clone(), &d.pairs);
         assert_each_line_once(&d, &rows);
-        // Non-unique twins never anchor, so no run of one-sided rows staggers the block.
-        let mut one_sided = 0;
-        let mut longest = 0;
-        for (o, n) in changed(&rows) {
-            one_sided = if o.is_none() || n.is_none() { one_sided + 1 } else { 0 };
-            longest = longest.max(one_sided);
-        }
         let (dels, inss) = d.rows.iter().fold((0usize, 0usize), |(a, b), r| match r {
             Row::Deletion { .. } => (a + 1, b),
             Row::Insertion { .. } => (a, b + 1),
             _ => (a, b),
         });
-        assert!(longest <= dels.abs_diff(inss), "one-sided run {longest} beyond the size gap");
+        // Non-unique twins never anchor, so this one block faces by position: only the size gap is one-sided.
+        let total = changed(&rows).iter().filter(|(o, n)| o.is_none() || n.is_none()).count();
+        assert_eq!(total, dels.abs_diff(inss), "a twin anchor would stagger the block");
     }
 }
