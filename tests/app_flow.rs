@@ -10892,6 +10892,8 @@ fn diff_view_split_opens_split_and_a_reread_never_flips_it() {
     assert!(app.split_on_screen(), "a reread never flips a running pane");
 }
 
+// A mode-only change needs a unix file mode.
+#[cfg(unix)]
 #[test]
 fn a_diff_with_no_changed_line_offers_no_split_and_keeps_the_choice() {
     use std::os::unix::fs::PermissionsExt;
