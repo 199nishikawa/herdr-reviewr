@@ -2095,6 +2095,10 @@ impl App {
     /// `|`: flip the diff between unified and split, where split can show; inert elsewhere.
     pub fn toggle_split(&mut self) {
         if !self.split_acts() {
+            // Only a pane too narrow says why, as `m` where nothing renders; elsewhere `|` is silent.
+            if self.split_allowed() {
+                self.status = "too narrow for split".to_string();
+            }
             return;
         }
         let to = if self.split_on_screen() { DiffView::Unified } else { DiffView::Split };

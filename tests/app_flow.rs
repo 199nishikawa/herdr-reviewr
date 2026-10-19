@@ -10861,6 +10861,7 @@ fn the_split_key_changes_nothing_where_split_cannot_show() {
     let before = app.visible.clone();
     press(&mut app, &keymap, KeyCode::Char('|'));
     assert_eq!(app.visible, before);
+    assert_eq!(app.status, "too narrow for split", "the footer says why, as `m` does");
     app.sync_split_width(140);
     assert!(!app.split_on_screen(), "the inert `|` never took the choice");
 }
@@ -11043,6 +11044,7 @@ fn the_split_key_is_inert_where_nothing_can_split() {
     app.sync_split_width(140);
     assert_eq!(app.diff_path.as_deref(), Some("z.rs"));
     assert!(!app.split_on_screen(), "no inert `|` took the choice");
+    assert!(!app.status.contains("narrow"), "where nothing can split, `|` says nothing");
 }
 
 #[test]
