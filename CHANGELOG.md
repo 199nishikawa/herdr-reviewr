@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.47.0] — 2026-10-19
+
 ### Added
 - **Split view**: `|` shows the diff side by side, and comments, find and copy work on both halves. `diff_view = "split"` starts a fresh pane in split.
   Thanks [@Tarektouati](https://github.com/Tarektouati) ([#116](https://github.com/persiyanov/herdr-reviewr/issues/116)).
