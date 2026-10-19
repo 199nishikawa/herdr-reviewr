@@ -11048,22 +11048,15 @@ fn the_split_key_is_inert_where_nothing_can_split() {
 }
 
 #[test]
-fn a_divider_drag_holds_the_layout_until_release() {
+fn a_divider_drag_flips_the_layout_as_it_moves() {
     let r = split_flow_repo();
     let mut app = common::app_on_split(&r);
     app.sync_split_width(140);
     app.start_divider_drag();
     app.sync_split_width(90);
-    assert!(app.split_on_screen(), "a width flip waits while the divider moves");
-    app.finish_divider_drag();
-    app.sync_split_width(90);
-    assert!(!app.split_on_screen(), "and lands on release");
-
+    assert!(!app.split_on_screen(), "a narrowing drag shows unified live, as a pane resize does");
     app.sync_split_width(140);
-    app.start_divider_drag();
-    app.cancel_divider_drag();
-    app.sync_split_width(90);
-    assert!(!app.split_on_screen(), "a cancelled drag moves nothing, so it holds nothing");
+    assert!(app.split_on_screen(), "and split again when it widens");
 }
 
 #[test]

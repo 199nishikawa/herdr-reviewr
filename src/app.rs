@@ -2067,7 +2067,7 @@ impl App {
 
     /// Whether the rows on screen hold their layout: a modal, a gesture or a row selection is open.
     fn layout_held(&self) -> bool {
-        self.view_frozen() || self.select_anchor.is_some() || self.divider_drag_active()
+        self.view_frozen() || self.select_anchor.is_some()
     }
 
     /// Whether split rows are on screen: there every row but a fold is a pair, elsewhere none.
